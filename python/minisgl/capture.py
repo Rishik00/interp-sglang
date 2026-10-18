@@ -72,7 +72,7 @@ class ActivationCaptureManager:
         spans: List[ActivationSpan] = []
         tensor_offset = 0
         for req in batch.reqs:
-            token_part = req.host_ids[req.cached_len : req.device_len].detach().clone()
+            token_part = req.input_ids[req.cached_len : req.device_len].detach().clone()
             token_parts.append(token_part)
             next_offset = tensor_offset + req.extend_len
             spans.append(
@@ -125,6 +125,13 @@ class ActivationCaptureManager:
         )
 
     def drain(self) -> List[CapturedActivation]:
+        """Hand all staged captures to the caller and empty the queue.
+
+        capture() only clones tensors on the GPU and appends them to `_staged`;
+        nothing leaves the device during the forward pass. drain() copies each
+        staged tensor to CPU (a blocking D2H copy), clears `_staged` so the GPU
+        clones can be freed, and returns the records sorted by (layer, signal).
+        """
         captures = [
             CapturedActivation(
                 signal=record.signal,
