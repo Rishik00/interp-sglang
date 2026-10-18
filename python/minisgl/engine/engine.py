@@ -5,6 +5,7 @@ from typing import Any, Dict, NamedTuple, Tuple
 
 import torch
 from minisgl.attention import create_attention_backend
+from minisgl.capture import ActivationCaptureManager
 from minisgl.core import Batch, Context, Req, set_global_ctx
 from minisgl.distributed import destroy_distributed, enable_pynccl_distributed, set_tp_info
 from minisgl.kvcache import create_kvcache_pool
@@ -76,6 +77,16 @@ class Engine:
         self.ctx.attn_backend = self.attn_backend = create_attention_backend(
             config.attention_backend, config.model_config
         )
+        if config.activation_capture is not None:
+            invalid_layers = sorted(
+                set(config.activation_capture.layer_ids) - set(range(config.model_config.num_layers))
+            )
+            if invalid_layers:
+                raise ValueError(f"Activation capture layers out of range: {invalid_layers}")
+            self.capture_manager = ActivationCaptureManager(config.activation_capture)
+        else:
+            self.capture_manager = None
+        self.ctx.capture_manager = self.capture_manager
         if config.model_config.is_moe:
             self.ctx.moe_backend = self.moe_backend = create_moe_backend(config.moe_backend)
 

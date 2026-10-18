@@ -14,6 +14,7 @@ __pycache__/
 # profiling data
 *.nsys-rep
 *.ncu-rep
+artifacts/modal-traces/
 
 # binaries
 build/

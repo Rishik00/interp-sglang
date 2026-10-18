@@ -37,6 +37,9 @@ class LlamaDecoderLayer(BaseOP):
         residual: torch.Tensor | None = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         x, residual = self.input_layernorm.forward(x, residual)
+        ctx = get_global_ctx()
+        if self._layer_id > 0 and ctx.capture_manager is not None:
+            ctx.capture_manager.capture("post_residual", self._layer_id - 1, residual, ctx.batch)
         x = self.self_attn.forward(x)
         x, residual = self.post_attention_layernorm.forward(x, residual)
         x = self.mlp.forward(x)
@@ -62,7 +65,13 @@ class LlamaModel(BaseOP):
         residual: torch.Tensor | None = None
         for layer in self.layers.op_list:
             x, residual = layer.forward(x, residual)
-        return self.norm.forward(x, residual)[0]
+        x, residual = self.norm.forward(x, residual)
+        ctx = get_global_ctx()
+        if ctx.capture_manager is not None:
+            ctx.capture_manager.capture(
+                "post_residual", len(self.layers.op_list) - 1, residual, ctx.batch
+            )
+        return x
 
 
 class LlamaForCausalLM(BaseLLMModel):

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from minisgl.core import get_global_ctx
 from minisgl.layers import (
     AttentionLayer,
     BaseOP,
@@ -114,13 +115,18 @@ class RopeAttn(BaseOP):
             config.hidden_size,
             has_bias=False,
         )
+        self.layer_id = layer_id
 
     @nvtx_annotate("MHA")
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         qkv = self.qkv_proj.forward(x)
         del x
         o = self.attn.forward(qkv)
-        return self.o_proj.forward(o)
+        output = self.o_proj.forward(o)
+        ctx = get_global_ctx()
+        if ctx.capture_manager is not None:
+            ctx.capture_manager.capture("attention_output", self.layer_id, output, ctx.batch)
+        return output
 
 
 __all__ = ["GatedMLP", "RopeAttn", "MoEMLP"]
