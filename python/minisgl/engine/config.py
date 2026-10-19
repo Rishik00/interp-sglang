@@ -5,6 +5,7 @@ from functools import cached_property
 from typing import TYPE_CHECKING, List
 
 import torch
+from minisgl.capture import ActivationCaptureConfig
 from minisgl.distributed import DistributedInfo
 from minisgl.utils import cached_load_hf_config
 
@@ -29,6 +30,7 @@ class EngineConfig:
     use_pynccl: bool = True
     max_seq_len_override: int | None = None
     num_page_override: int | None = None  # if not None, will override the number of pages
+    activation_capture: ActivationCaptureConfig | None = None
 
     @cached_property
     def hf_config(self):

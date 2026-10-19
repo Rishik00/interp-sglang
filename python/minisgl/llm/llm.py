@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Tuple
 
 import torch
+from minisgl.capture import CapturedActivation
 from minisgl.core import SamplingParams
 from minisgl.distributed import DistributedInfo
 from minisgl.message import (
@@ -96,3 +97,9 @@ class LLM(Scheduler):
             output_text = self.tokenizer.decode(status.output_ids)
             results.append({"text": output_text, "token_ids": status.output_ids})
         return results
+
+    def take_activation_captures(self) -> List[CapturedActivation]:
+        """Move all staged activation captures to CPU and clear the staging queue."""
+        if self.engine.capture_manager is None:
+            return []
+        return self.engine.capture_manager.drain()
