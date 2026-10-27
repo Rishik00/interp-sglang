@@ -88,6 +88,7 @@ class Engine:
             self.capture_manager = None
         self.ctx.capture_manager = self.capture_manager
         if config.model_config.is_moe:
+            print("So....its an MoE now?")
             self.ctx.moe_backend = self.moe_backend = create_moe_backend(config.moe_backend)
 
         # ======================= Sampler initialization ========================
