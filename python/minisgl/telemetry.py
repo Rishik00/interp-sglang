@@ -13,7 +13,7 @@ class Telemetry:
 
     TTFT is measured from entry to ``LLM.generate`` until the first generated
     token is delivered. Prefill throughput uses CUDA event time around prefill
-    model forwards. Decode throughput uses generated tokens after the first,
+    model forwards. Decode throughput uses generated tokens after each request's first,
     divided by the host-observed first-to-last token interval.
     """
 
@@ -25,6 +25,7 @@ class Telemetry:
         self._first_token_at: float | None = None
         self._last_token_at: float | None = None
         self._generated_tokens = 0
+        self._seen_uids: set[int] = set()
         self._memory_snapshots: dict[str, dict[str, int]] = {}
         self.last_result: dict[str, Any] | None = None
 
@@ -43,6 +44,7 @@ class Telemetry:
         self._first_token_at = None
         self._last_token_at = None
         self._generated_tokens = 0
+        self._seen_uids.clear()
         self._memory_snapshots = {"generation_start": self._memory_snapshot()}
         self._active = True
 
@@ -59,8 +61,9 @@ class Telemetry:
         if not self._active:
             return
         now = time.perf_counter()
-        for _message in messages:
+        for message in messages:
             self._generated_tokens += 1
+            self._seen_uids.add(message.uid)
             if self._first_token_at is None:
                 self._first_token_at = now
                 self._memory_snapshots["first_token"] = self._memory_snapshot()
@@ -91,8 +94,9 @@ class Telemetry:
             "ttft_seconds": ttft,
             "generated_tokens": self._generated_tokens,
             "first_to_last_token_seconds": first_to_last,
+            # Each request's first token comes from prefill, so only later tokens count as decode.
             "decode_tokens_per_second": (
-                (self._generated_tokens - 1) / first_to_last
+                (self._generated_tokens - len(self._seen_uids)) / first_to_last
                 if first_to_last is not None and first_to_last > 0
                 else None
             ),
