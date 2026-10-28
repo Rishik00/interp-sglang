@@ -36,6 +36,7 @@ class LLM(Scheduler):
             **kwargs,
         )
         super().__init__(config)
+        self.telemetry = self.engine.telemetry
         self.pending_requests: List[Tuple[List[int] | str, SamplingParams]] = []
         self.status_map: Dict[int, RequestStatus] = {}
         self.counter = 0
@@ -70,12 +71,25 @@ class LLM(Scheduler):
         return results
 
     def offline_send_result(self, reply: List[DetokenizeMsg]) -> None:
+        if self.telemetry is not None:
+            self.telemetry.record_tokens(reply)
         for msg in reply:
             status = self.status_map[msg.uid]
             if not (msg.finished and msg.next_token == self.eos_token_id):
                 status.output_ids.append(msg.next_token)
 
     def generate(
+        self,
+        prompts: List[str] | List[List[int]],
+        sampling_params: List[SamplingParams] | SamplingParams,
+    ) -> List[Dict[str, str | List[int]]]:
+        if self.telemetry is None:
+            return self._generate(prompts, sampling_params)
+        
+        with self.telemetry:
+            return self._generate(prompts, sampling_params)
+
+    def _generate(
         self,
         prompts: List[str] | List[List[int]],
         sampling_params: List[SamplingParams] | SamplingParams,

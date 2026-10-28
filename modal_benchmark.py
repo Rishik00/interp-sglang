@@ -18,7 +18,8 @@ from typing import TYPE_CHECKING, Any
 
 import modal
 
-from minisgl.llm import LLM #type:ignore
+if TYPE_CHECKING:
+    from minisgl.llm import LLM  # type: ignore
 
 from config import (
     CAPTURE_LAYERS,

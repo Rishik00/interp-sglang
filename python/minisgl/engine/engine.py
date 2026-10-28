@@ -12,6 +12,7 @@ from minisgl.kvcache import create_kvcache_pool
 from minisgl.layers import set_rope_device
 from minisgl.models import create_model, load_weight
 from minisgl.moe import create_moe_backend
+from minisgl.telemetry import Telemetry
 from minisgl.utils import div_even, init_logger, is_sm90_supported, is_sm100_supported, torch_dtype
 
 from .config import EngineConfig
@@ -34,6 +35,7 @@ class Engine:
         _adjust_config(config)
 
         self.device = torch.device(f"cuda:{config.tp_info.rank}")
+        self.telemetry = Telemetry(self.device) if config.telemetry_enabled else None
         torch.cuda.set_device(self.device)
         torch.manual_seed(42)
         self.stream = torch.cuda.Stream()
@@ -86,9 +88,9 @@ class Engine:
             self.capture_manager = ActivationCaptureManager(config.activation_capture)
         else:
             self.capture_manager = None
+            
         self.ctx.capture_manager = self.capture_manager
         if config.model_config.is_moe:
-            print("So....its an MoE now?")
             self.ctx.moe_backend = self.moe_backend = create_moe_backend(config.moe_backend)
 
         # ======================= Sampler initialization ========================
@@ -202,11 +204,25 @@ class Engine:
 
     def forward_batch(self, batch: Batch, args: BatchSamplingArgs) -> ForwardOutput:
         assert torch.cuda.current_stream() == self.stream
+        telemetry_start = telemetry_end = None
+        if self.telemetry is not None and batch.is_prefill:
+            telemetry_start = torch.cuda.Event(enable_timing=True)
+            telemetry_end = torch.cuda.Event(enable_timing=True)
+            telemetry_start.record(self.stream)
+
         with self.ctx.forward_batch(batch):
             if self.graph_runner.can_use_cuda_graph(batch):
                 logits = self.graph_runner.replay(batch)
             else:
                 logits = self.model.forward()
+
+        if telemetry_start is not None and telemetry_end is not None:
+            telemetry_end.record(self.stream)
+            self.telemetry.record_batch(
+                sum(req.extend_len for req in batch.reqs),
+                telemetry_start,
+                telemetry_end,
+            )
 
         for req in batch.reqs:
             req.complete_one()
