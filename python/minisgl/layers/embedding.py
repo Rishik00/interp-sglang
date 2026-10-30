@@ -89,6 +89,10 @@ class ParallelLMHead(VocabParallelEmbedding):
         ctx = get_global_ctx()
         batch = ctx.batch
         bs = batch.size
+        if ctx.capture_manager is not None:
+            # Capture every prefill token after final normalization, before the
+            # head selects only the positions needed for next-token sampling.
+            ctx.capture_manager.capture("lm_head_input", None, x, batch)
         if batch.is_prefill:
             indices = batch.attn_metadata.get_last_indices(bs)
             x = x[indices].contiguous()

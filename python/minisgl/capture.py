@@ -9,16 +9,17 @@ if TYPE_CHECKING:
     from minisgl.core import Batch
 
 
-ActivationSignal = Literal["attention_output", "post_residual"]
+ActivationSignal = Literal["attention_output", "post_residual", "lm_head_input"]
 
 
 @dataclass(frozen=True)
 class ActivationCaptureConfig:
-    """Select the layers and residual-space signals to capture during prefill."""
+    """Select prefill signals; LM head input capture is independent of layer_ids."""
 
     layer_ids: Tuple[int, ...]
     capture_attention_output: bool = True
     capture_post_residual: bool = True
+    capture_lm_head_input: bool = False
 
 
 @dataclass(frozen=True)
@@ -35,7 +36,7 @@ class ActivationSpan:
 @dataclass(frozen=True)
 class CapturedActivation:
     signal: ActivationSignal
-    layer_id: int
+    layer_id: int | None  # None identifies the model-level LM head input.
     phase: str
     tensor: torch.Tensor
     token_ids: torch.Tensor
@@ -45,7 +46,7 @@ class CapturedActivation:
 @dataclass(frozen=True)
 class _StagedActivation:
     signal: ActivationSignal
-    layer_id: int
+    layer_id: int | None
     phase: str
     tensor: torch.Tensor
     token_ids: torch.Tensor
@@ -64,6 +65,8 @@ class ActivationCaptureManager:
     def _signal_enabled(self, signal: ActivationSignal) -> bool:
         if signal == "attention_output":
             return self.config.capture_attention_output
+        if signal == "lm_head_input":
+            return self.config.capture_lm_head_input
         return self.config.capture_post_residual
 
     @staticmethod
@@ -92,15 +95,17 @@ class ActivationCaptureManager:
     def capture(
         self,
         signal: ActivationSignal,
-        layer_id: int,
+        layer_id: int | None,
         tensor: torch.Tensor,
         batch: Batch,
     ) -> None:
         # Decode may run under CUDA graphs. This first implementation intentionally
         # captures prefill only, which also keeps graph construction untouched.
-        if not self.enabled or not batch.is_prefill or layer_id not in self._layer_ids:
+        if not self.enabled or not batch.is_prefill:
             return
         if not self._signal_enabled(signal):
+            return
+        if signal != "lm_head_input" and layer_id not in self._layer_ids:
             return
 
         token_ids, spans = self._provenance(batch)
@@ -130,7 +135,8 @@ class ActivationCaptureManager:
         capture() only clones tensors on the GPU and appends them to `_staged`;
         nothing leaves the device during the forward pass. drain() copies each
         staged tensor to CPU (a blocking D2H copy), clears `_staged` so the GPU
-        clones can be freed, and returns the records sorted by (layer, signal).
+        clones can be freed, and returns model-level records first, followed by
+        layer records sorted by (layer, signal).
         """
         captures = [
             CapturedActivation(
@@ -144,4 +150,7 @@ class ActivationCaptureManager:
             for record in self._staged
         ]
         self._staged.clear()
-        return sorted(captures, key=lambda item: (item.layer_id, item.signal))
+        return sorted(
+            captures,
+            key=lambda item: (-1 if item.layer_id is None else item.layer_id, item.signal),
+        )

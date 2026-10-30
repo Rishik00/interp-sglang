@@ -1,5 +1,40 @@
 # Features of Mini-SGLang
 
+## Prefill activation capture
+
+The offline Python interface can capture selected transformer signals and the
+normalized input to the LM head:
+
+```python
+from minisgl.capture import ActivationCaptureConfig
+from minisgl.llm import LLM
+
+llm = LLM(
+    model_path="Qwen/Qwen3-0.6B",
+    activation_capture=ActivationCaptureConfig(
+        layer_ids=(1, 6, 13, 20, 27),
+        capture_lm_head_input=True,
+    ),
+)
+# After llm.generate(...):
+captures = llm.take_activation_captures()
+head_inputs = [item for item in captures if item.signal == "lm_head_input"]
+```
+
+`lm_head_input` is opt-in (default `False`) and records every newly processed
+prefill token after final normalization, before the LM head selects positions
+for projection. Its tensor has shape `[tokens, hidden_size]`; it contains no
+vocabulary logits. These model-level records have `layer_id=None`, independent
+of `layer_ids`. Set `layer_ids=()` to capture only the head input. The hook is in
+the shared `ParallelLMHead`, so it applies to every model using that head.
+
+Like the block signals, each record includes token IDs and request/token spans.
+Chunked prefill returns separate records for each chunk. Captures are staged on
+GPU until drained to CPU, so drain regularly to release staging memory. Decode
+is skipped, and cached prefix tokens are not recomputed or captured. Existing
+block capture counts and benchmark defaults are unchanged unless the new signal
+is explicitly enabled.
+
 ## Online Serving
 
 Mini-SGLang supports online serving with an OpenAI-compatible API server. It provides the standard `/v1/chat/completions` endpoint, allowing seamless integration with existing tools and clients. For detailed command-line arguments and configuration options, run `python -m minisgl --help`.

@@ -65,3 +65,40 @@ def test_capture_can_be_temporarily_disabled() -> None:
     manager.capture("attention_output", 2, torch.ones(2, 3), batch)
 
     assert manager.drain() == []
+
+
+def test_lm_head_input_is_opt_in_and_independent_of_layer_selection() -> None:
+    batch = Batch(reqs=[_req(10, [1, 2, 3], cached_len=1)], phase="prefill")
+    source = torch.arange(6, dtype=torch.float32).reshape(2, 3)
+    disabled = ActivationCaptureManager(ActivationCaptureConfig(layer_ids=()))
+    disabled.capture("lm_head_input", None, source, batch)
+    assert disabled.drain() == []
+
+    manager = ActivationCaptureManager(
+        ActivationCaptureConfig(layer_ids=(), capture_lm_head_input=True)
+    )
+    manager.capture("lm_head_input", None, source, batch)
+    source.fill_(-1)
+    capture, = manager.drain()
+    assert capture.signal == "lm_head_input"
+    assert capture.layer_id is None
+    assert torch.equal(capture.tensor, torch.arange(6).reshape(2, 3))
+    assert capture.token_ids.tolist() == [2, 3]
+    assert capture.spans[0].token_start == 1
+    assert capture.spans[0].token_end == 3
+
+    batch.phase = "decode"
+    manager.capture("lm_head_input", None, torch.ones(1, 3), batch)
+    assert manager.drain() == []
+
+
+def test_model_level_and_layer_captures_can_be_drained_together() -> None:
+    manager = ActivationCaptureManager(
+        ActivationCaptureConfig(layer_ids=(2,), capture_lm_head_input=True)
+    )
+    batch = Batch(reqs=[_req(10, [1, 2], cached_len=0)], phase="prefill")
+    manager.capture("post_residual", 2, torch.ones(2, 3), batch)
+    manager.capture("lm_head_input", None, torch.ones(2, 3), batch)
+    assert [(item.layer_id, item.signal) for item in manager.drain()] == [
+        (None, "lm_head_input"), (2, "post_residual"),
+    ]
