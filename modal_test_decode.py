@@ -1,0 +1,317 @@
+"""Bounded, CUDA-graph decode harvesting on a pinned WildChat sample.
+
+Run: python -X utf8 modal_test_decode.py --model-id Qwen/Qwen3-1.7B --gpu T4
+The uninstrumented baseline and capture run use separate, fresh CUDA processes.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import subprocess
+import time
+import uuid
+
+import modal
+
+from config import LOCAL_REPO, REMOTE_CACHE, app, cache_volume, dependency_image
+from modal_benchmark import prepare_workload
+from utils import (
+    DecodeGzipWriter,
+    compare_activations,
+    measure_decode_generation,
+    read_decode_request,
+    write_run_artifact,
+)
+
+
+def validate_decode_reference(model_id, directory, index, workload, sampled):
+    """Teacher-force exact token IDs and compare only generated-token positions."""
+    import torch
+    from transformers import AutoModelForCausalLM
+
+    reference = (
+        AutoModelForCausalLM.from_pretrained(
+            model_id,
+            torch_dtype=torch.float16,
+            attn_implementation="eager",
+        )
+        .eval()
+        .to("cuda")
+    )
+    thresholds = {"relative_l2_max": 0.05, "cosine_min": 0.999, "minimum_token_cosine_min": 0.98}
+    rows = []
+    matches = total_predictions = 0
+    for request_id, (prompt, generated) in enumerate(zip(workload["prompts"], sampled)):
+        actual, tokens, keys = read_decode_request(directory, index, request_id)
+        prompt_length = len(prompt["token_ids"])
+        assert [token["token_id"] for token in tokens] == generated
+        assert [token["token_position"] for token in tokens] == list(
+            range(prompt_length, prompt_length + len(generated))
+        )
+        assert sum(token["terminal"] for token in tokens) == 1
+        expected = {}
+
+        def hook(key):
+            def capture(module, args, output):
+                tensor = output[0] if isinstance(output, tuple) else output
+                expected[key] = tensor[0, prompt_length:].detach().cpu().clone()
+
+            return capture
+
+        handles = []
+        for layer, signal in keys:
+            if signal == "lm_head_input":
+                module = reference.model.norm
+            elif signal == "post_residual":
+                module = reference.model.layers[layer]
+            else:
+                module = reference.model.layers[layer].self_attn.o_proj
+            handles.append(module.register_forward_hook(hook((layer, signal))))
+        try:
+            with torch.inference_mode():
+                result = reference(
+                    torch.tensor([prompt["token_ids"] + generated], device="cuda"),
+                    use_cache=False,
+                    logits_to_keep=len(generated) + 1,
+                )
+                predicted = result.logits[0, :-1].argmax(dim=-1).cpu().tolist()
+                matches += sum(a == b for a, b in zip(predicted, generated))
+                total_predictions += len(generated)
+                del result
+            assert set(expected) == set(keys)
+            for signal_index, (layer, signal) in enumerate(keys):
+                assert actual[signal_index].shape == expected[(layer, signal)].shape
+                rows.append(
+                    {
+                        "request_id": request_id,
+                        "dataset_row": prompt["dataset_row"],
+                        "layer": layer,
+                        "signal": signal,
+                        **compare_activations(
+                            actual[signal_index], expected[(layer, signal)], thresholds
+                        ),
+                    }
+                )
+        finally:
+            for handle in handles:
+                handle.remove()
+        print(f"[decode reference] request={request_id} tokens={len(generated)}", flush=True)
+    return {
+        "thresholds": thresholds,
+        "rows": rows,
+        "all_passed": all(row["passed"] for row in rows),
+        "passed": sum(row["passed"] for row in rows),
+        "hf_greedy_token_matches": matches,
+        "hf_greedy_tokens": total_predictions,
+        "token_and_position_alignment": True,
+        "terminal_token_coverage": True,
+    }
+
+
+@app.function(
+    image=dependency_image,
+    gpu="T4",
+    memory=16384,
+    timeout=2400,
+    volumes={str(REMOTE_CACHE): cache_volume},
+    single_use_containers=True,
+)
+def run_decode(
+    model_id,
+    workload,
+    capture,
+    run_id,
+    source_commit,
+    max_tokens=100,
+    window_steps=16,
+    gpu_budget_mib=128,
+    ignore_eos=False,
+):
+    import torch
+    import transformers
+    from minisgl.capture import ActivationCaptureConfig
+    from minisgl.core import SamplingParams
+    from minisgl.llm import LLM
+    from transformers import AutoConfig
+
+    model_config = AutoConfig.from_pretrained(model_id)
+    layers = tuple(range(model_config.num_hidden_layers))
+    directory = REMOTE_CACHE / "decode-harvest" / run_id
+    writer = DecodeGzipWriter(directory) if capture else None
+    capture_config = (
+        ActivationCaptureConfig(
+            layer_ids=layers,
+            capture_lm_head_input=True,
+            capture_prefill=False,
+            capture_decode=True,
+            decode_window_steps=window_steps,
+            decode_gpu_budget_bytes=gpu_budget_mib * 2**20,
+            decode_sink=writer,
+        )
+        if capture
+        else None
+    )
+    llm = LLM(
+        model_path=model_id,
+        dtype=torch.float16,
+        cache_type="naive",
+        max_running_req=4,
+        max_extend_tokens=256,
+        max_seq_len_override=4096,
+        cuda_graph_bs=[1, 2, 4],
+        memory_ratio=0.45,
+        use_pynccl=False,
+        activation_capture=capture_config,
+    )
+    manager = llm.engine.capture_manager
+    try:
+        if manager is not None:
+            manager.enabled = False
+        llm.generate(
+            [workload["prompts"][0]["token_ids"]],
+            SamplingParams(top_k=1, temperature=0, max_tokens=8, ignore_eos=True),
+        )
+        if manager is not None:
+            manager.enabled = True
+        metrics = measure_decode_generation(
+            llm,
+            [prompt["token_ids"] for prompt in workload["prompts"]],
+            SamplingParams(top_k=1, temperature=0, max_tokens=max_tokens, ignore_eos=ignore_eos),
+        )
+        llm.cache_manager.check_integrity()
+        assert llm.take_activation_captures() == []  # Prefill capture is disabled.
+        result = {
+            "model": model_id,
+            "source_commit": source_commit,
+            "gpu": torch.cuda.get_device_name(),
+            "torch": torch.__version__,
+            "transformers": transformers.__version__,
+            "capture": capture,
+            "workload": workload,
+            "metrics": metrics,
+            "config": {
+                "layers": layers,
+                "max_tokens": max_tokens,
+                "window_steps": window_steps,
+                "gpu_budget_mib": gpu_budget_mib,
+                "dtype": "float16",
+                "max_running_req": 4,
+                "cache_type": "naive",
+                "max_extend_tokens": 256,
+                "max_seq_len": 4096,
+                "memory_ratio": 0.45,
+                "ignore_eos": ignore_eos,
+                "overlap": False,
+                "cuda_graph_batches": sorted(llm.engine.graph_runner.graph_map),
+            },
+            "cache_integrity": True,
+        }
+        if manager is not None:
+            assert manager.decode_stats["captured_rows"] == metrics["sampled_tokens"]
+            assert manager.decode_stats["terminal_rows"] == len(workload["prompts"])
+            assert manager.decode_stats["graph_batches"] > 0
+            assert manager.decode_stats["eager_batches"] == 0
+            result["capture_stats"] = dict(manager.decode_stats)
+            index = writer.close()
+            result["storage"] = {
+                "volume": "mini-sglang-cache",
+                "directory": str(directory.relative_to(REMOTE_CACHE)),
+                **index,
+            }
+            # Validate after timing, so reference computation is not capture overhead.
+            result["reference"] = validate_decode_reference(
+                model_id, directory, index, workload, metrics["sampled_token_ids"]
+            )
+        return result
+    finally:
+        # Finish pending writes before closing the sink or destroying graphs.
+        llm.shutdown()
+        if writer is not None and not writer.closed:
+            writer.close()
+        cache_volume.commit()
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--model-id", default="Qwen/Qwen3-1.7B")
+    parser.add_argument("--gpu", default="T4")
+    parser.add_argument("--num-prompts", type=int, default=20)
+    parser.add_argument("--max-tokens", type=int, default=100)
+    parser.add_argument("--window-steps", type=int, default=16)
+    parser.add_argument("--gpu-budget-mib", type=int, default=128)
+    parser.add_argument("--ignore-eos", action="store_true")
+    args = parser.parse_args()
+    if args.num_prompts < 4 or args.num_prompts % 4:
+        parser.error("--num-prompts must be a multiple of four, at least four")
+    if not 1 <= args.max_tokens <= 1023 or args.window_steps < 1 or args.gpu_budget_mib < 1:
+        parser.error("Invalid token limit, window size or capture budget")
+    source_commit = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=LOCAL_REPO, text=True
+    ).strip()
+    run_id = "decode-" + time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()) + "-" + uuid.uuid4().hex[:6]
+    results = {}
+    output_dir = LOCAL_REPO / "artifacts" / "modal-traces"
+    with modal.enable_output(), app.run(detach=True):
+        workload = prepare_workload.spawn(
+            args.model_id,
+            {
+                "count": args.num_prompts,
+                "seed": 42,
+                "revision": "c827c6df8fcf008219ffaffa4d1dd77491099367",
+                "max_tokens": 3072,
+                "scan_rows": 4096,
+            },
+        ).get()
+        for capture in (False, True):
+            result = (
+                run_decode.with_options(gpu=args.gpu)
+                .spawn(
+                    model_id=args.model_id,
+                    workload=workload,
+                    capture=capture,
+                    run_id=run_id,
+                    source_commit=source_commit,
+                    max_tokens=args.max_tokens,
+                    window_steps=args.window_steps,
+                    gpu_budget_mib=args.gpu_budget_mib,
+                    ignore_eos=args.ignore_eos,
+                )
+                .get()
+            )
+            name = "decode-capture" if capture else "decode-baseline"
+            results[name] = result
+            path = write_run_artifact(result, output_dir, name)
+            print(f"Results: {path}")
+            print(
+                json.dumps(
+                    {
+                        "mode": name,
+                        "seconds": result["metrics"]["seconds"],
+                        "tokens_per_second": result["metrics"]["tokens_per_second"],
+                        "sampled_tokens": result["metrics"]["sampled_tokens"],
+                        "capture_stats": result.get("capture_stats"),
+                        "reference_passed": result.get("reference", {}).get("passed"),
+                    },
+                    indent=2,
+                )
+            )
+    baseline, captured = results["decode-baseline"], results["decode-capture"]
+    identical = baseline["metrics"]["sampled_token_ids"] == captured["metrics"]["sampled_token_ids"]
+    summary = {
+        "model": args.model_id,
+        "source_commit": source_commit,
+        "all_outputs_identical": identical,
+        "throughput_retained": captured["metrics"]["tokens_per_second"]
+        / baseline["metrics"]["tokens_per_second"],
+        "reference_passed": captured["reference"]["all_passed"],
+        "storage": {key: value for key, value in captured["storage"].items() if key != "windows"},
+    }
+    print(json.dumps(summary, indent=2))
+    write_run_artifact(summary, output_dir, "decode-summary")
+    if not identical or not summary["reference_passed"]:
+        raise SystemExit(1)
+
+
+if __name__ == "__main__":
+    main()

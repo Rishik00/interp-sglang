@@ -85,7 +85,7 @@ class LLM(Scheduler):
     ) -> List[Dict[str, str | List[int]]]:
         if self.telemetry is None:
             return self._generate(prompts, sampling_params)
-        
+
         with self.telemetry:
             return self._generate(prompts, sampling_params)
 
@@ -105,6 +105,8 @@ class LLM(Scheduler):
             self.run_forever()
         except RequestAllFinished:
             pass
+        if self.engine.capture_manager is not None:
+            self.engine.capture_manager.flush_decode()
         results: List[Dict[str, str | List[int]]] = []
         for i in range(len(prompts)):
             status = self.status_map[i]

@@ -16,7 +16,7 @@ from minisgl.telemetry import Telemetry
 from minisgl.utils import div_even, init_logger, is_sm90_supported, is_sm100_supported, torch_dtype
 
 from .config import EngineConfig
-from .graph import GraphRunner, get_free_memory, mem_GB
+from .graph import GraphRunner, _determine_cuda_graph_bs, get_free_memory, mem_GB
 from .sample import BatchSamplingArgs, Sampler
 
 logger = init_logger(__name__)
@@ -54,6 +54,31 @@ class Engine:
             self.model = create_model(config.model_config)
         self.model.load_state_dict(self._load_weight_state_dict(config))
 
+        # Capture allocations count against the engine memory ratio, rather than
+        # silently consuming memory already promised to the KV cache.
+        if config.activation_capture is not None:
+            invalid_layers = sorted(
+                set(config.activation_capture.layer_ids)
+                - set(range(config.model_config.num_layers))
+            )
+            if invalid_layers:
+                raise ValueError(f"Activation capture layers out of range: {invalid_layers}")
+            if config.activation_capture.capture_decode and config.tp_info.size != 1:
+                raise ValueError("The decode capture prototype supports tensor parallel size 1")
+            self.capture_manager = ActivationCaptureManager(config.activation_capture)
+            graph_sizes = _determine_cuda_graph_bs(
+                config.cuda_graph_bs, config.cuda_graph_max_bs, init_free_memory
+            )
+            self.capture_manager.prepare_decode(
+                max([config.max_running_req, *graph_sizes]),
+                config.model_config.hidden_size,
+                self.dtype,
+                self.device,
+            )
+        else:
+            self.capture_manager = None
+        self.ctx.capture_manager = self.capture_manager
+
         # ======================= KV cache initialization ========================
         self.num_pages = self._determine_num_pages(init_free_memory, config)
         num_tokens = self.num_pages * config.page_size
@@ -79,17 +104,6 @@ class Engine:
         self.ctx.attn_backend = self.attn_backend = create_attention_backend(
             config.attention_backend, config.model_config
         )
-        if config.activation_capture is not None:
-            invalid_layers = sorted(
-                set(config.activation_capture.layer_ids) - set(range(config.model_config.num_layers))
-            )
-            if invalid_layers:
-                raise ValueError(f"Activation capture layers out of range: {invalid_layers}")
-            self.capture_manager = ActivationCaptureManager(config.activation_capture)
-        else:
-            self.capture_manager = None
-            
-        self.ctx.capture_manager = self.capture_manager
         if config.model_config.is_moe:
             self.ctx.moe_backend = self.moe_backend = create_moe_backend(config.moe_backend)
 
@@ -210,11 +224,7 @@ class Engine:
             telemetry_end = torch.cuda.Event(enable_timing=True)
             telemetry_start.record(self.stream)
 
-        with self.ctx.forward_batch(batch):
-            if self.graph_runner.can_use_cuda_graph(batch):
-                logits = self.graph_runner.replay(batch)
-            else:
-                logits = self.model.forward()
+        logits = self.forward_model(batch)
 
         if telemetry_start is not None and telemetry_end is not None:
             telemetry_end.record(self.stream)
@@ -233,7 +243,26 @@ class Engine:
         copy_done_event.record(self.stream)
         return ForwardOutput(next_tokens_gpu, next_tokens_cpu, copy_done_event)
 
+    def forward_model(self, batch: Batch, terminal: bool = False) -> torch.Tensor:
+        """Forward without sampling; also used for the final sampled token's capture."""
+        manager = self.capture_manager
+        used_graph = self.graph_runner.can_use_cuda_graph(batch)
+        if manager is not None and batch.is_decode:
+            manager.decode_written.clear()
+            manager.decode_forward_active = True
+        try:
+            with self.ctx.forward_batch(batch):
+                logits = self.graph_runner.replay(batch) if used_graph else self.model.forward()
+            if manager is not None and batch.is_decode:
+                manager.finish_decode(batch, used_graph, terminal)
+            return logits
+        finally:
+            if manager is not None:
+                manager.decode_forward_active = False
+
     def shutdown(self) -> None:
+        if self.capture_manager is not None:
+            self.capture_manager.flush_decode()
         self.graph_runner.destroy_cuda_graphs()
         torch.distributed.destroy_process_group()
         destroy_distributed()
