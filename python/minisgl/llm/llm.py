@@ -106,7 +106,10 @@ class LLM(Scheduler):
         except RequestAllFinished:
             pass
         if self.engine.capture_manager is not None:
-            self.engine.capture_manager.flush_decode()
+            # run_forever has left the engine stream. Keep the final partial
+            # window's CPU copy ordered after its pending GPU snapshot writes.
+            with self.engine_stream_ctx:
+                self.engine.capture_manager.flush_decode()
         results: List[Dict[str, str | List[int]]] = []
         for i in range(len(prompts)):
             status = self.status_map[i]

@@ -262,7 +262,8 @@ class Engine:
 
     def shutdown(self) -> None:
         if self.capture_manager is not None:
-            self.capture_manager.flush_decode()
+            with torch.cuda.stream(self.stream):
+                self.capture_manager.flush_decode()
         self.graph_runner.destroy_cuda_graphs()
         torch.distributed.destroy_process_group()
         destroy_distributed()
