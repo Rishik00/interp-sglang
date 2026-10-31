@@ -60,3 +60,6 @@ Both benchmark and validation run by default. Use `--mode benchmark` or
 Shared experiment helpers are in `utils.py`; decode-specific helpers have their
 own `Decode` section. This prototype does not implement paper reproductions,
 gradient support, asynchronous compression, or storage uploads to a CDN.
+
+The completed Qwen3-1.7B T4 run, measured overhead and validation limits are
+documented in the [decode harvesting report](docs/experiment-reports/qwen3-decode-harvesting.md).
