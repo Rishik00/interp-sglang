@@ -1,6 +1,6 @@
+from pathlib import Path, PurePosixPath
 
 import modal
-from pathlib import Path, PurePosixPath
 
 app = modal.App("mini-sglang-capture-benchmark")
 CAPTURE_LAYERS = (1, 6, 13, 20, 27)
@@ -11,6 +11,7 @@ REMOTE_CACHE = PurePosixPath("/cache")
 LOCAL_REPO = Path(__file__).resolve().parent
 PROJECT_DEPENDENCIES = (
     "accelerate",
+    "pyarrow",
     "msgpack",
     "sgl_kernel>=0.3.17.post1",
     "transformers>=4.56.0,<=4.57.3",

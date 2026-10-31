@@ -5,13 +5,15 @@ Modal run: https://modal.com/apps/a-nerdy-penguin/main/ap-8i3lqgEGfc6j5SSxuKakVO
 
 All 60 activation comparisons passed on Qwen/Qwen3-0.6B, Tesla T4,
 FP16. The reference used Transformers 4.57.3 with eager attention, while
-Mini-SGLang used FlashInfer. Reproduce with:
+Mini-SGLang used FlashInfer. These historical results used the earlier
+synthetic/QA cases. The merged runner now uses WildChat; run current dataset
+validation with:
 
 ```powershell
-python -X utf8 modal_validate_activations.py
+python -X utf8 modal_benchmark.py --mode validate --model-id Qwen/Qwen3-0.6B --gpu T4
 ```
 
-The reusable harness is `modal_validate_activations.py`. It compares layers
+The reusable harness is now merged into `modal_benchmark.py`. It compares layers
 0, 1, 6, 13, 20, and 27 at two independently hooked HF locations:
 
 - `attention_output`: the output of `self_attn.o_proj`.

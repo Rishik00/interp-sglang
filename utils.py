@@ -1,10 +1,11 @@
-
 import gc
 import statistics
 from typing import Any
 
+
 def mean(rows: list[dict[str, Any]], key: str) -> float:
     return statistics.mean(float(row[key]) for row in rows)
+
 
 def summarize(rows: list[dict[str, Any]], capture: bool) -> dict[str, float]:
     selected = [row for row in rows if row["capture"] is capture]
@@ -21,6 +22,7 @@ def summarize(rows: list[dict[str, Any]], capture: bool) -> dict[str, float]:
     )
     return {key: mean(selected, key) for key in keys}
 
+
 def memory_snapshot() -> dict[str, int]:
     import torch
 
@@ -35,6 +37,8 @@ def memory_snapshot() -> dict[str, int]:
 
 
 def tokenize_prompt(tokenizer, user_prompt: str) -> list[int]:
+    if not tokenizer.chat_template:
+        return list(tokenizer.encode(user_prompt))
     ids = tokenizer.apply_chat_template(
         [{"role": "user", "content": user_prompt}],
         tokenize=True,
@@ -43,6 +47,7 @@ def tokenize_prompt(tokenizer, user_prompt: str) -> list[int]:
     )
     return list(ids)
 
+
 def mem_cleanup():
     import torch
 
@@ -50,3 +55,218 @@ def mem_cleanup():
     torch.cuda.empty_cache()
     torch.cuda.synchronize()
     torch.cuda.reset_peak_memory_stats()
+
+
+def median(rows: list[dict[str, Any]], key: str) -> float:
+    if not rows:
+        raise ValueError(f"Cannot summarize {key}: no benchmark rows")
+    return statistics.median(float(row[key]) for row in rows)
+
+
+def summarize_medians(rows: list[dict[str, Any]], capture: bool) -> dict[str, float]:
+    selected = [row for row in rows if row["capture"] is capture]
+    keys = (
+        "ttft_seconds",
+        "prefill_tokens_per_second",
+        "decode_tokens_per_second",
+        "generation_seconds",
+        "drain_seconds",
+        "end_to_end_tokens_per_second",
+        "peak_driver_used_bytes",
+    )
+    return {key: median(selected, key) for key in keys}
+
+
+def capture_layers(num_layers: int) -> tuple[int, ...]:
+    """Sample six depths, including the first and last decoder blocks."""
+    if num_layers < 1:
+        raise ValueError("Model must have at least one layer")
+    return tuple(
+        sorted({0, 1 if num_layers > 1 else 0, *((num_layers - 1) * i // 4 for i in range(1, 5))})
+    )
+
+
+def write_run_artifact(result: dict[str, Any], output_dir, prefix: str):
+    import json
+    import time
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    model = result["model"].replace("/", "--")
+    path = output_dir / f"{prefix}-{model}-{timestamp}.json"
+    path.write_text(json.dumps(result, indent=2), encoding="utf-8")
+    return path
+
+
+def compare_activations(actual, expected, thresholds: dict[str, float]) -> dict[str, Any]:
+    """Use FP64 reductions on drained CPU tensors for stable error metrics."""
+    import torch
+    import torch.nn.functional as F
+
+    actual, expected = actual.double(), expected.double()
+    if actual.shape != expected.shape:
+        raise ValueError(f"Activation shapes differ: {actual.shape} != {expected.shape}")
+    finite = bool(torch.isfinite(actual).all() and torch.isfinite(expected).all())
+    nonzero = bool(actual.norm() > 0 and actual.std() > 0)
+    difference = actual - expected
+    relative_l2 = float(difference.norm() / expected.norm().clamp_min(1e-12))
+    cosine = float(F.cosine_similarity(actual.flatten(), expected.flatten(), dim=0))
+    token_cosine = float(F.cosine_similarity(actual, expected, dim=-1).min())
+    return {
+        "finite": finite,
+        "nonzero": nonzero,
+        "relative_l2": relative_l2,
+        "cosine": cosine,
+        "minimum_token_cosine": token_cosine,
+        "max_absolute_error": float(difference.abs().max()),
+        "passed": (
+            finite
+            and nonzero
+            and relative_l2 <= thresholds["relative_l2_max"]
+            and cosine >= thresholds["cosine_min"]
+            and token_cosine >= thresholds["minimum_token_cosine_min"]
+        ),
+    }
+
+
+WILDCHAT_ID = "allenai/WildChat-4.8M"
+WILDCHAT_SHARD = "data/train-00000-of-00086.parquet"
+
+
+def sample_wildchat_rows(rows, tokenizer, count: int, seed: int, max_tokens: int):
+    """Length-stratified sample of first-user turns; never truncate prompts."""
+    import hashlib
+    import random
+
+    if count < 4 or count % 4:
+        raise ValueError("num_prompts must be a positive multiple of four (at least 4)")
+    if max_tokens < 2049:
+        raise ValueError("Allow at least 2049 input tokens to test natural long prompts")
+    bounds = (256, 1024, 2048, max_tokens)
+    buckets = [[] for _ in bounds]
+    seen = set()
+    scanned = 0
+    for row_index, row in enumerate(rows):
+        scanned += 1
+        turn = next((t for t in (row.get("conversation") or []) if t.get("role") == "user"), None)
+        if turn is None:
+            continue
+        text = (turn.get("content") or "").strip()
+        if (
+            not text
+            or turn.get("language", row.get("language")) not in {"English", "Chinese"}
+            or any(bool(obj.get(flag)) for obj in (row, turn) for flag in ("redacted", "toxic"))
+        ):
+            continue
+        digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        if digest in seen:
+            continue
+        seen.add(digest)
+        ids = tokenize_prompt(tokenizer, text)
+        if not ids or len(ids) > max_tokens:
+            continue
+        bucket = next(i for i, bound in enumerate(bounds) if len(ids) <= bound)
+        buckets[bucket].append(
+            {
+                "dataset_row": row_index,
+                "conversation_hash": row.get("conversation_hash"),
+                "prompt_sha256": digest,
+                "user_prompt": text,
+                "token_ids": ids,
+                "input_tokens": len(ids),
+                "length_bucket": bucket,
+            }
+        )
+    rng = random.Random(seed)
+    selected = []
+    for bucket, candidates in enumerate(buckets):
+        if len(candidates) < count // 4:
+            raise ValueError(
+                f"Length bucket {bucket} has only {len(candidates)} candidates; "
+                f"need {count // 4}. Increase --dataset-scan-rows."
+            )
+        rng.shuffle(candidates)
+        selected.extend(candidates[: count // 4])
+    rng.shuffle(selected)
+    return selected, scanned
+
+
+def load_wildchat_prompts(
+    tokenizer, count: int, seed: int, revision: str, max_tokens: int, scan_rows: int
+):
+    from itertools import islice
+
+    import pyarrow.parquet as pq
+    from huggingface_hub import hf_hub_download
+
+    path = hf_hub_download(WILDCHAT_ID, WILDCHAT_SHARD, repo_type="dataset", revision=revision)
+    parquet = pq.ParquetFile(path)
+    columns = [
+        c
+        for c in ("conversation", "conversation_hash", "language", "redacted", "toxic")
+        if c in parquet.schema_arrow.names
+    ]
+    rows = (
+        row
+        for batch in parquet.iter_batches(batch_size=256, columns=columns)
+        for row in batch.to_pylist()
+    )
+    prompts, scanned = sample_wildchat_rows(
+        islice(rows, scan_rows), tokenizer, count, seed, max_tokens
+    )
+    return {
+        "dataset": WILDCHAT_ID,
+        "revision": revision,
+        "split": "train",
+        "shard": WILDCHAT_SHARD,
+        "seed": seed,
+        "scanned_rows": scanned,
+        "sample_count": count,
+        "selection": "equal samples from token ranges 1-256, 257-1024, 1025-2048, 2049-max",
+        "max_input_tokens": max_tokens,
+        "truncated": False,
+        "filters": {
+            "languages": ["English", "Chinese"],
+            "exclude_redacted": True,
+            "exclude_toxic": True,
+            "turn": "first_user",
+            "deduplicate": "prompt_sha256",
+        },
+        "prompts": prompts,
+    }
+
+
+def reconstruct_capture(captures, layer, signal, request_id: int, ids: list[int]):
+    """Validate capture provenance and concatenate prefill chunks for one request."""
+    import torch
+
+    pieces = []
+    for capture in captures:
+        if (capture.layer_id, capture.signal) != (layer, signal):
+            continue
+        if capture.phase != "prefill":
+            raise ValueError("Expected a prefill capture")
+        for span in capture.spans:
+            if span.request_id != request_id:
+                continue
+            if (
+                capture.token_ids[span.tensor_start : span.tensor_end].cpu().tolist()
+                != ids[span.token_start : span.token_end]
+            ):
+                raise ValueError("Captured token IDs do not match input")
+            pieces.append(
+                (
+                    span.token_start,
+                    span.token_end,
+                    capture.tensor[span.tensor_start : span.tensor_end],
+                )
+            )
+    pieces.sort(key=lambda p: p[0])
+    end = 0
+    for start, stop, _ in pieces:
+        if start != end:
+            raise ValueError(f"Capture gap or overlap at token {end}; next span starts at {start}")
+        end = stop
+    if end != len(ids):
+        raise ValueError(f"Captured {end}/{len(ids)} tokens; cached prefixes may have been skipped")
+    return torch.cat([p[2] for p in pieces])

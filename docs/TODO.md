@@ -3,10 +3,13 @@
 ## 1. Stress-test the current setup
 
 ### Correctness against a reference
-- [ ] Compare captured `post_residual` with HF `transformers` `output_hidden_states=True`
+- [x] Compare captured `post_residual` with HF `transformers` `output_hidden_states=True`
       for Qwen3-0.6B and a Llama model (layer N here = `hidden_states[N + 1]` there). Set fp32/fp16 tolerances.
-- [ ] Compare `attention_output` with a forward hook on HF's `o_proj`.
+- [x] Compare `attention_output` with a forward hook on HF's `o_proj`.
 - [ ] Greedy outputs are identical with capture on and off (re-run on this base).
+
+### Implementation corrections
+- [ ] Have a base component class that has the capture manager wired in. 
 
 ### Scheduler interactions that could break capture provenance
 - [ ] **Chunked prefill**: a long prompt split into `ChunkedReq`s yields one capture per chunk;
@@ -39,7 +42,6 @@ Candidates to evaluate in full SGLang:
 - [ ] **Deterministic / batch-invariant inference**: makes captured activations reproducible
       regardless of batch composition. Probably the most valuable for interp.
 - [ ] **Hybrid linear-attention state cache** (used for Qwen3-Next): a prerequisite for Qwen 3.5 (§3).
-- [ ] **LoRA serving** (multi-adapter batching): lets us capture activations from LoRA-tuned variants.
 - [ ] **Custom logit processors / steering hooks**: a starting point for interventions, not just reads.
 - [ ] **Weight update without restart** (`update_weights`): swap checkpoints without rebuilding the engine.
 - [ ] **Quantization loaders** (FP8, AWQ/GPTQ): may be needed for Bonsai (§3).

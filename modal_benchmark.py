@@ -1,10 +1,17 @@
-"""Paired capture/memory benchmark on ten basic QA prompts.
+"""Paired capture/memory benchmark and HF activation validation.
 
+A pinned, length-stratified WildChat sample replaces the synthetic/QA prompts.
 Each prompt is run once with prefill activation capture disabled and once with
 capture enabled. Generation stops at EOS, subject to --max-tokens.
 
-Usage:
-    python modal_benchmark.py --gpu T4 --max-tokens 512
+Usage (both phases by default):
+    python modal_benchmark.py --gpu T4 --model-id Qwen/Qwen3-1.7B
+    python modal_benchmark.py --gpu T4 --model-id meta-llama/Llama-3.2-1B-Instruct
+    python modal_benchmark.py --mode validate --model-id Qwen/Qwen3-1.7B
+
+Benchmark sizing flags apply to the benchmark phase. Validation deliberately uses
+naive caching, 256-token chunks, two concurrent requests, and a 0.45 memory ratio
+so both the serving engine and the Hugging Face reference fit on a T4.
 """
 
 from __future__ import annotations
@@ -14,6 +21,7 @@ import json
 import os
 import statistics
 import time
+from dataclasses import asdict
 from typing import TYPE_CHECKING, Any
 
 import modal
@@ -22,36 +30,24 @@ if TYPE_CHECKING:
     from minisgl.llm import LLM  # type: ignore
 
 from config import (
-    CAPTURE_LAYERS,
     LOCAL_REPO,
-    PROMPTS,
     REMOTE_CACHE,
     REMOTE_REPO,
     app,
     cache_volume,
     dependency_image,
 )
-from utils import mem_cleanup, memory_snapshot, tokenize_prompt
-
-
-def _median(rows: list[dict[str, Any]], key: str) -> float:
-    if not rows:
-        raise ValueError(f"Cannot summarize {key}: no benchmark rows")
-    return statistics.median(float(row[key]) for row in rows)
-
-
-def _summarize(rows: list[dict[str, Any]], capture: bool) -> dict[str, float]:
-    selected = [row for row in rows if row["capture"] is capture]
-    keys = (
-        "ttft_seconds",
-        "prefill_tokens_per_second",
-        "decode_tokens_per_second",
-        "generation_seconds",
-        "drain_seconds",
-        "end_to_end_tokens_per_second",
-        "peak_driver_used_bytes",
-    )
-    return {key: _median(selected, key) for key in keys}
+from utils import (
+    capture_layers,
+    compare_activations,
+    load_wildchat_prompts,
+    mem_cleanup,
+    memory_snapshot,
+    reconstruct_capture,
+    summarize_medians,
+    tokenize_prompt,
+    write_run_artifact,
+)
 
 
 def run_once(
@@ -61,15 +57,16 @@ def run_once(
     capture: bool,
     ids: list[int],
     max_tokens: int,
+    layers: tuple[int, ...],
     warmup: bool = False,
 ) -> dict[str, Any]:
     import torch
-    from minisgl.core import SamplingParams #type:ignore
+    from minisgl.core import SamplingParams  # type:ignore
 
     manager.enabled = capture
     if manager.drain():
         raise RuntimeError("Capture queue was not empty before iteration")
-    
+
     mem_cleanup()
     memory_before = memory_snapshot()
 
@@ -124,9 +121,17 @@ def run_once(
     drain_finished = time.perf_counter()
     memory_after_drain = memory_snapshot()
 
-    expected_captures = 2 * len(CAPTURE_LAYERS) if capture else 0
-    if len(captures) != expected_captures:
-        raise RuntimeError(f"Expected {expected_captures} captures, received {len(captures)}")
+    expected_keys = {
+        (layer, signal) for layer in layers for signal in ("attention_output", "post_residual")
+    }
+    expected_keys.add((None, "lm_head_input"))
+    if capture:
+        if {(c.layer_id, c.signal) for c in captures} != expected_keys:
+            raise RuntimeError("Missing or unexpected capture signals")
+        for layer, signal in expected_keys:
+            reconstruct_capture(captures, layer, signal, 0, ids)
+    elif captures:
+        raise RuntimeError("Received captures while disabled")
     capture_bytes = sum(item.tensor.numel() * item.tensor.element_size() for item in captures)
     del captures
 
@@ -160,11 +165,9 @@ def run_once(
         / (generation_seconds + drain_finished - drain_started),
         "capture_bytes": capture_bytes,
         "peak_driver_used_bytes": peak_driver_used,
-
         # Retain lifecycle snapshots to distinguish staged capture memory from
         # memory remaining after drain and explicit release.
         "memory_before": memory_before,
-
         "memory_before_drain": memory_before_drain,
         "memory_after_drain": memory_after_drain,
         "memory_after_release": memory_after_release,
@@ -181,9 +184,8 @@ def run_once(
 
     return row
 
-# Defaults cover direct Modal invocation; CLI options supply per-run configuration.
-@app.function(image=dependency_image, gpu="T4", volumes={str(REMOTE_CACHE): cache_volume})
-def run_benchmark(
+
+def benchmark_model(
     max_tokens: int,
     model_id: str,
     cache_type: str,
@@ -192,6 +194,8 @@ def run_benchmark(
     max_seq_len: int,
     memory_ratio: float,
     use_pynccl: bool,
+    layers: tuple[int, ...],
+    workload: dict[str, Any],
 ) -> dict[str, Any]:
 
     import torch
@@ -213,7 +217,7 @@ def run_benchmark(
         max_seq_len_override=max_seq_len,
         memory_ratio=memory_ratio,
         use_pynccl=use_pynccl,
-        activation_capture=ActivationCaptureConfig(layer_ids=CAPTURE_LAYERS),
+        activation_capture=ActivationCaptureConfig(layer_ids=layers, capture_lm_head_input=True),
     )
     manager = llm.engine.capture_manager
     tokenizer = llm.tokenizer
@@ -221,31 +225,33 @@ def run_benchmark(
     assert manager is not None
     assert tokenizer is not None
 
-    prompt_ids = [tokenize_prompt(tokenizer, prompt) for prompt in PROMPTS]
+    prompt_ids = [prompt["token_ids"] for prompt in workload["prompts"]]
     if max(len(ids) for ids in prompt_ids) + max_tokens >= max_seq_len:
         raise RuntimeError("Prompt plus completion safety cap exceeds max sequence length")
     try:
         print("[benchmark] warming CUDA graph and both capture modes", flush=True)
         warmup_ids = tokenize_prompt(tokenizer, "Explain in one sentence what a tensor is.")
-        run_once(manager, llm, -1, False, warmup_ids, max_tokens, warmup=True)
-        run_once(manager, llm, -1, True, warmup_ids, max_tokens, warmup=True)
+        run_once(manager, llm, -1, False, warmup_ids, max_tokens, layers, warmup=True)
+        run_once(manager, llm, -1, True, warmup_ids, max_tokens, layers, warmup=True)
 
         rows: list[dict[str, Any]] = []
         for index, ids in enumerate(prompt_ids):
             # Alternate mode order across prompts to reduce systematic warm/order bias.
             order = (False, True) if index % 2 == 0 else (True, False)
-            pair = [run_once(manager, llm, index, capture, ids, max_tokens) for capture in order]
+            pair = [
+                run_once(manager, llm, index, capture, ids, max_tokens, layers) for capture in order
+            ]
             off = next(row for row in pair if not row["capture"])
             on = next(row for row in pair if row["capture"])
             if off["result_token_ids"] != on["result_token_ids"]:
                 raise RuntimeError(f"Capture changed greedy output for prompt {index}")
             rows.extend(pair)
 
-        off_summary = _summarize(rows, False)
-        on_summary = _summarize(rows, True)
+        off_summary = summarize_medians(rows, False)
+        on_summary = summarize_medians(rows, True)
         pairs = []
 
-        for index in range(len(PROMPTS)):
+        for index in range(len(prompt_ids)):
             off = next(row for row in rows if row["prompt_index"] == index and not row["capture"])
             on = next(row for row in rows if row["prompt_index"] == index and row["capture"])
             pairs.append(
@@ -257,7 +263,8 @@ def run_benchmark(
                     "ttft_overhead_percent": (on["ttft_seconds"] / off["ttft_seconds"] - 1) * 100,
                     "decode_tps_change_percent": (
                         on["decode_tokens_per_second"] / off["decode_tokens_per_second"] - 1
-                    ) * 100,
+                    )
+                    * 100,
                     "peak_driver_used_delta_bytes": (
                         on["peak_driver_used_bytes"] - off["peak_driver_used_bytes"]
                     ),
@@ -268,14 +275,12 @@ def run_benchmark(
         result = {
             "model": model_id,
             "gpu": torch.cuda.get_device_name(0),
-            "capture_layers": CAPTURE_LAYERS,
-            "capture_signals": ("attention_output", "post_residual"),
+            "capture_layers": layers,
+            "capture_signals": ("attention_output", "post_residual", "lm_head_input"),
             "capture_scope": "prefill_only",
             "max_tokens_safety_cap": max_tokens,
-            "prompts": [
-                {"index": i, "user_prompt": prompt, "input_tokens": len(prompt_ids[i])}
-                for i, prompt in enumerate(PROMPTS)
-            ],
+            "workload": workload,
+            "prompts": workload["prompts"],
             "rows": rows,
             "pairs": pairs,
             "median_capture_off": off_summary,
@@ -298,52 +303,334 @@ def run_benchmark(
         # engine teardown on success and on any failed measurement.
         llm.shutdown()
 
+
+def validate_model(model_id: str, layers: tuple[int, ...], workload: dict[str, Any]) -> dict:
+    import torch
+    import transformers
+    from minisgl.capture import ActivationCaptureConfig
+    from minisgl.core import SamplingParams
+    from minisgl.llm import LLM
+    from transformers import AutoModelForCausalLM
+
+    # Aggregate and per-token checks tolerate FP16 kernel/reduction differences.
+    thresholds = {"relative_l2_max": 0.05, "cosine_min": 0.999, "minimum_token_cosine_min": 0.98}
+    samples = workload["prompts"]
+    cases = [(f"dataset_row_{p['dataset_row']}", [p["token_ids"]]) for p in samples]
+    # Reuse two real prompts to exercise request/span separation in a batch.
+    shortest = sorted(samples, key=lambda p: p["input_tokens"])[:2]
+    cases.append(("two_requests", [p["token_ids"] for p in shortest]))
+    llm = LLM(
+        model_path=model_id,
+        dtype=torch.float16,
+        cache_type="naive",
+        cuda_graph_max_bs=1,
+        max_extend_tokens=256,
+        max_running_req=2,
+        max_seq_len_override=4096,
+        memory_ratio=0.45,
+        use_pynccl=False,
+        activation_capture=ActivationCaptureConfig(layer_ids=layers, capture_lm_head_input=True),
+    )
+    saved = []
+    sampling = SamplingParams(top_k=1, temperature=0, max_tokens=3, ignore_eos=True)
+    try:
+        for name, prompts in cases:
+            manager = llm.engine.capture_manager
+            manager.enabled = False
+            off = llm.generate(prompts, sampling)
+            assert llm.take_activation_captures() == []
+            manager.enabled = True
+            on = llm.generate(prompts, sampling)
+            captures = llm.take_activation_captures()
+            assert llm.take_activation_captures() == []
+            assert [r["token_ids"] for r in off] == [r["token_ids"] for r in on]
+            saved.append((name, prompts, on, captures))
+            print(f"[validate] captured {name}: {len(captures)} records", flush=True)
+
+        # Hook the actual block outputs: HF's final hidden_states entry is
+        # normalized, whereas our final post_residual is BEFORE the final norm.
+        reference = (
+            AutoModelForCausalLM.from_pretrained(
+                model_id,
+                torch_dtype=torch.float16,
+                attn_implementation="eager",
+            )
+            .eval()
+            .to("cuda")
+        )
+        hooked = {}
+
+        def hook(key):
+            def record(module, args, output):
+                value = output[0] if isinstance(output, tuple) else output
+                hooked[key] = value.detach().squeeze(0).cpu().clone()
+
+            return record
+
+        handles = []
+        # The final norm emits the full head input before either runtime slices
+        # positions for projection (HF's logits_to_keep also slices positions).
+        handles.append(reference.model.norm.register_forward_hook(hook((None, "lm_head_input"))))
+        for layer in layers:
+            block = reference.model.layers[layer]
+            handles.append(block.register_forward_hook(hook((layer, "post_residual"))))
+            handles.append(
+                block.self_attn.o_proj.register_forward_hook(hook((layer, "attention_output")))
+            )
+
+        rows = []
+        metadata = []
+        for name, prompts, outputs, captures in saved:
+            expected_keys = {
+                (layer, signal)
+                for layer in layers
+                for signal in ("attention_output", "post_residual")
+            }
+            expected_keys.add((None, "lm_head_input"))
+            assert {(c.layer_id, c.signal) for c in captures} == expected_keys
+            metadata.append(
+                {
+                    "case": name,
+                    "input_tokens": [len(p) for p in prompts],
+                    "capture_records": len(captures),
+                    "spans": [
+                        asdict(s)
+                        for c in captures
+                        if c.layer_id == 0 and c.signal == "post_residual"
+                        for s in c.spans
+                    ],
+                }
+            )
+            for request_id, ids in enumerate(prompts):
+                hooked.clear()
+                with torch.inference_mode():
+                    result = reference(
+                        input_ids=torch.tensor([ids], device="cuda"),
+                        use_cache=False,
+                        logits_to_keep=1,
+                    )
+                assert set(hooked) == expected_keys
+                first_token_matches = (
+                    int(result.logits[0, -1].argmax()) == outputs[request_id]["token_ids"][0]
+                )
+                del result
+                for layer, signal in sorted(
+                    expected_keys, key=lambda key: (-1 if key[0] is None else key[0], key[1])
+                ):
+                    actual = reconstruct_capture(captures, layer, signal, request_id, ids)
+                    expected = hooked[(layer, signal)].float()
+                    assert (
+                        actual.shape == expected.shape == (len(ids), reference.config.hidden_size)
+                    )
+                    metrics = compare_activations(actual, expected, thresholds)
+                    metrics["passed"] &= first_token_matches
+                    rows.append(
+                        {
+                            "case": name,
+                            "request_id": request_id,
+                            "layer": layer,
+                            "signal": signal,
+                            "shape": list(actual.shape),
+                            **metrics,
+                            "hf_first_token_matches": first_token_matches,
+                        }
+                    )
+                print(f"[validate] compared {name} request={request_id}", flush=True)
+        for handle in handles:
+            handle.remove()
+        return {
+            "model": model_id,
+            "gpu": torch.cuda.get_device_name(),
+            "torch": torch.__version__,
+            "transformers": transformers.__version__,
+            "dtype": "float16",
+            "hf_attention": "eager",
+            "metric_dtype": "float64",
+            "layers": layers,
+            "thresholds": thresholds,
+            "workload": workload,
+            "cases": metadata,
+            "rows": rows,
+            "capture_on_off_outputs_identical": True,
+            "all_passed": all(r["passed"] for r in rows),
+        }
+    finally:
+        llm.shutdown()
+
+
+@app.function(
+    image=dependency_image,
+    memory=8192,
+    timeout=1200,
+    volumes={str(REMOTE_CACHE): cache_volume},
+)
+def prepare_workload(model_id: str, dataset_options: dict[str, Any]) -> dict[str, Any]:
+    from transformers import AutoTokenizer
+
+    workload = load_wildchat_prompts(AutoTokenizer.from_pretrained(model_id), **dataset_options)
+    print(
+        f"[dataset] {workload['dataset']} revision={workload['revision']} "
+        f"rows={[p['dataset_row'] for p in workload['prompts']]} "
+        f"tokens={[p['input_tokens'] for p in workload['prompts']]}",
+        flush=True,
+    )
+    return workload
+
+
+# Each phase uses a separate container so allocator and CUDA graph state cannot
+# contaminate benchmark timings or take VRAM away from the HF reference.
+@app.function(
+    image=dependency_image,
+    gpu="T4",
+    memory=8192,
+    timeout=1200,
+    volumes={str(REMOTE_CACHE): cache_volume},
+    single_use_containers=True,
+)
+def run_benchmark(mode: str, model_id: str, workload: dict[str, Any], **kwargs) -> dict[str, Any]:
+    from transformers import AutoConfig
+
+    layers = capture_layers(AutoConfig.from_pretrained(model_id).num_hidden_layers)
+    if mode == "validate":
+        return validate_model(model_id, layers, workload)
+    if mode == "benchmark":
+        return benchmark_model(model_id=model_id, layers=layers, workload=workload, **kwargs)
+    raise ValueError(f"Unknown mode: {mode}")
+
+
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Capture on/off benchmark on Modal")
+    parser = argparse.ArgumentParser(
+        description="Capture on/off benchmark and HF activation validation on Modal"
+    )
+    parser.add_argument(
+        "--num-prompts", type=int, default=16, help="WildChat samples; multiple of 4"
+    )
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--dataset-revision", default="c827c6df8fcf008219ffaffa4d1dd77491099367")
+    parser.add_argument("--dataset-scan-rows", type=int, default=4096)
+    parser.add_argument("--max-input-tokens", type=int, default=3072)
+    parser.add_argument(
+        "--mode", choices=("both", "benchmark", "validate", "sample"), default="both"
+    )
+    parser.add_argument(
+        "--hf-secret", help="Existing Modal secret containing HF_TOKEN for gated models"
+    )
     parser.add_argument("--gpu", default="T4", help="Modal GPU type, e.g. T4, L4, A10G")
-    parser.add_argument('--model-id', type=str, default="Qwen/Qwen3-0.6B")
+    parser.add_argument("--model-id", type=str, default="Qwen/Qwen3-0.6B")
     parser.add_argument("--cpu", type=float, default=2.0)
     parser.add_argument("--memory", type=int, default=8192, help="Container memory in MiB")
     parser.add_argument("--timeout", type=int, default=20 * 60, help="Seconds")
     parser.add_argument("--max-tokens", type=int, default=512, help="Generation safety cap")
 
-    parser.add_argument("--cache-type", type=str, default="naive", help="KV cache implementation")
-    parser.add_argument("--max-extend-tokens", type=int, default=3072, help="Maximum prefill extension size")
-    parser.add_argument("--max-running-req", type=int, default=1, help="Maximum concurrent requests")
-    parser.add_argument("--max-seq-len", type=int, default=4096, help="Maximum prompt plus generation length")
-    parser.add_argument("--memory-ratio", type=float, default=0.75, help="Fraction of GPU memory available to the engine")
-    parser.add_argument("--use-nccl", action=argparse.BooleanOptionalAction, default=False, help="Enable PyNCCL")
+    parser.add_argument(
+        "--cache-type",
+        choices=("naive", "radix"),
+        default="naive",
+        help="Prefix-cache implementation",
+    )
+    parser.add_argument(
+        "--max-extend-tokens", type=int, default=3072, help="Maximum prefill extension size"
+    )
+    parser.add_argument(
+        "--max-running-req", type=int, default=1, help="Maximum concurrent requests"
+    )
+    parser.add_argument(
+        "--max-seq-len", type=int, default=4096, help="Maximum prompt plus generation length"
+    )
+    parser.add_argument(
+        "--memory-ratio",
+        type=float,
+        default=0.75,
+        help="Fraction of GPU memory available to the engine",
+    )
+    parser.add_argument(
+        "--use-nccl", action=argparse.BooleanOptionalAction, default=False, help="Enable PyNCCL"
+    )
 
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.num_prompts < 4 or args.num_prompts % 4:
+        parser.error("--num-prompts must be a multiple of four, at least 4")
+    if args.dataset_scan_rows < args.num_prompts:
+        parser.error("--dataset-scan-rows must be at least --num-prompts")
+    if not 2049 <= args.max_input_tokens <= 4092:
+        parser.error("--max-input-tokens must be between 2049 and 4092")
+    if (
+        args.mode in ("both", "benchmark")
+        and args.max_input_tokens + args.max_tokens >= args.max_seq_len
+    ):
+        parser.error("--max-input-tokens plus --max-tokens must be below --max-seq-len")
+    return args
+
 
 def main() -> None:
     args = parse_args()
-    benchmark = run_benchmark.with_options(
-        gpu=args.gpu, cpu=args.cpu, memory=args.memory, timeout=args.timeout
-    )
+    options = {"gpu": args.gpu, "cpu": args.cpu, "memory": args.memory, "timeout": args.timeout}
+    if args.hf_secret:
+        options["secrets"] = [modal.Secret.from_name(args.hf_secret, required_keys=["HF_TOKEN"])]
+    else:
+        from huggingface_hub import get_token
 
-    # Detached so the run survives a dropped client; spawn().get() waits for the result.
+        token = get_token()
+        if token:
+            options["secrets"] = [modal.Secret.from_dict({"HF_TOKEN": token})]
+    runner = run_benchmark.with_options(**options)
+    modes = ("benchmark", "validate") if args.mode == "both" else (args.mode,)
+    failed = False
     with modal.enable_output(), app.run(detach=True):
-        result = benchmark.spawn(
-            max_tokens=args.max_tokens,
-            model_id=args.model_id,
-            cache_type=args.cache_type, 
-            max_extend_tokens=args.max_extend_tokens,
-            max_running_req=args.max_running_req,
-            max_seq_len=args.max_seq_len,
-            memory_ratio=args.memory_ratio,
-            use_pynccl=args.use_nccl,
+        sampler = prepare_workload.with_options(**{k: v for k, v in options.items() if k != "gpu"})
+        workload = sampler.spawn(
+            args.model_id,
+            {
+                "count": args.num_prompts,
+                "seed": args.seed,
+                "revision": args.dataset_revision,
+                "max_tokens": args.max_input_tokens,
+                "scan_rows": args.dataset_scan_rows,
+            },
         ).get()
+        manifest_path = write_run_artifact(
+            {"model": args.model_id, "workload": workload},
+            LOCAL_REPO / "artifacts" / "modal-traces",
+            "wildchat-prompts",
+        )
+        print(f"Prompt manifest: {manifest_path}")
+        if args.mode == "sample":
+            return
+        for mode in modes:
+            kwargs = (
+                {}
+                if mode == "validate"
+                else {
+                    "max_tokens": args.max_tokens,
+                    "cache_type": args.cache_type,
+                    "max_extend_tokens": args.max_extend_tokens,
+                    "max_running_req": args.max_running_req,
+                    "max_seq_len": args.max_seq_len,
+                    "memory_ratio": args.memory_ratio,
+                    "use_pynccl": args.use_nccl,
+                }
+            )
+            kwargs["workload"] = workload
+            result = runner.spawn(mode=mode, model_id=args.model_id, **kwargs).get()
+            path = write_run_artifact(result, LOCAL_REPO / "artifacts" / "modal-traces", mode)
+            print(f"Results: {path}")
+            if mode == "validate":
+                failed |= not result["all_passed"]
+                summary = {
+                    "all_passed": result["all_passed"],
+                    "comparisons": len(result["rows"]),
+                    "failures": [r for r in result["rows"] if not r["passed"]],
+                }
+            else:
+                summary = {
+                    key: value
+                    for key, value in result.items()
+                    if key not in ("rows", "prompts", "pairs", "workload")
+                }
+            print(json.dumps(summary, indent=2))
+    if failed:
+        raise SystemExit(1)
 
-    output_dir = LOCAL_REPO / "artifacts" / "modal-traces"
-    output_dir.mkdir(parents=True, exist_ok=True)
-    timestamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
-    output_path = output_dir / f"benchmark-qa-{timestamp}.json"
-    output_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
-
-    summary = {key: value for key, value in result.items() if key not in ("rows", "prompts")}
-    print(json.dumps(summary, indent=2))
-    print(f"\nRaw benchmark: {output_path}")
 
 if __name__ == "__main__":
     main()
