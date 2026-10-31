@@ -4,6 +4,23 @@ import torch
 from utils import capture_layers, compare_activations
 
 
+def test_request_timing_separates_queue_and_prefill_from_decode():
+    from utils import decode_request_timing
+
+    early = decode_request_timing(0, 50, [2.0, 2.25, 2.5])
+    queued = decode_request_timing(1, 100, [12.0, 12.25, 12.5])
+    assert early["decode_tokens_per_second"] == queued["decode_tokens_per_second"] == 4.0
+    assert early["mean_inter_token_ms"] == 250.0
+    assert queued["time_to_first_token_seconds"] == 12.0
+    assert queued["completion_seconds"] == 12.5
+    assert queued["end_to_end_tokens_per_second"] == 3 / 12.5
+    single = decode_request_timing(2, 1, [1.0])
+    assert single["decode_tokens_per_second"] is None
+    assert single["mean_inter_token_ms"] is None
+    with pytest.raises(ValueError, match="ordered"):
+        decode_request_timing(3, 1, [1.0, 0.5])
+
+
 @pytest.mark.parametrize("depth", [1, 2, 16, 28, 32, 64])
 def test_capture_layers_cover_valid_model_depth(depth):
     layers = capture_layers(depth)

@@ -32,6 +32,14 @@ including the terminal token, and verifies decompressed chunk checksums. Reports
 include actual throughput, generation equality, capture memory, compression sizes,
 and reference comparison failures. Numerical failures produce exit status 1.
 
+Each run also records per-request host token receipt times. Time to first token
+and completion latency start when the whole job is submitted, so they include
+queueing and prefill. Per-request decode speed is `(generated tokens - 1) /
+(last token time - first token time)`; it excludes the first token produced by
+prefill, and includes scheduling stalls, capture and synchronous writes between
+tokens. A one-token request has no decode-speed measurement. The final job flush
+after the last token callback remains part of total job time, not token latency.
+
 Results are saved locally under `artifacts/modal-traces/`. Compressed captures and
 their index persist on the `mini-sglang-cache` Modal volume under the directory
 printed in the result's storage metadata. Download a run with:

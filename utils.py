@@ -275,6 +275,30 @@ def reconstruct_capture(captures, layer, signal, request_id: int, ids: list[int]
 # ================================ Decode ================================
 
 
+def decode_request_timing(request_id, input_tokens, token_receipt_seconds):
+    """Host-observed latency from job submission, and first-to-last token speed."""
+    count = len(token_receipt_seconds)
+    if not count:
+        raise ValueError("Request has no sampled tokens to time")
+    first, last = token_receipt_seconds[0], token_receipt_seconds[-1]
+    decode_seconds = last - first
+    if first < 0 or any(b < a for a, b in zip(token_receipt_seconds, token_receipt_seconds[1:])):
+        raise ValueError("Token receipt times must be nonnegative and ordered")
+    # The first token comes from prefill; only subsequent tokens count as decode.
+    return {
+        "request_id": request_id,
+        "input_tokens": input_tokens,
+        "sampled_tokens": count,
+        "time_to_first_token_seconds": first,
+        "completion_seconds": last,
+        "end_to_end_tokens_per_second": count / last if last > 0 else None,
+        "decode_seconds": decode_seconds,
+        "decode_tokens_per_second": (count - 1) / decode_seconds if decode_seconds > 0 else None,
+        "mean_inter_token_ms": 1000 * decode_seconds / (count - 1) if count > 1 else None,
+        "token_receipt_seconds": token_receipt_seconds,
+    }
+
+
 def measure_decode_generation(llm, prompt_ids, sampling):
     """Measure the whole job, including terminal capture, CPU flushes and compression."""
     import time
@@ -282,12 +306,17 @@ def measure_decode_generation(llm, prompt_ids, sampling):
     import torch
 
     sampled = [[] for _ in prompt_ids]
+    receipts = [[] for _ in prompt_ids]
     finishes = {}
     original_callback = llm.send_result
 
     def record_result(messages):
+        # The scheduler has synchronized sampled IDs before calling this callback.
+        # One timestamp per batch avoids attributing Python iteration to requests.
+        received = time.perf_counter() - started
         for message in messages:
             sampled[message.uid].append(int(message.next_token))
+            receipts[message.uid].append(received)
             if message.finished:
                 finishes[message.uid] = (
                     "eos"
@@ -313,6 +342,10 @@ def measure_decode_generation(llm, prompt_ids, sampling):
         "finish_reasons": finishes,
         "sampled_tokens": sum(map(len, sampled)),
         "tokens_per_second": sum(map(len, sampled)) / elapsed,
+        "request_timings": [
+            decode_request_timing(uid, len(ids), receipts[uid])
+            for uid, ids in enumerate(prompt_ids)
+        ],
         "peak_allocated_bytes": torch.cuda.max_memory_allocated(),
         "peak_reserved_bytes": torch.cuda.max_memory_reserved(),
     }

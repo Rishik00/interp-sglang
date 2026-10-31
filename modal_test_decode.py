@@ -292,6 +292,14 @@ def main():
                         "sampled_tokens": result["metrics"]["sampled_tokens"],
                         "capture_stats": result.get("capture_stats"),
                         "reference_passed": result.get("reference", {}).get("passed"),
+                        "request_timings": [
+                            {
+                                key: value
+                                for key, value in row.items()
+                                if key != "token_receipt_seconds"
+                            }
+                            for row in result["metrics"]["request_timings"]
+                        ],
                     },
                     indent=2,
                 )
