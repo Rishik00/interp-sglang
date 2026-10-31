@@ -78,3 +78,42 @@ checks, buffer reuse, padded-row exclusion, sink failures and bit-exact gzip
 round-trips. Ruff and whitespace checks passed. This is a single-GPU prototype;
 asynchronous transfers, background compression, CDN uploads, gradients and paper
 reproductions are outside this implementation.
+
+## Per-request timing rerun
+
+A subsequent run measured CPU-observed token receipt times for every request. All requests were submitted together. Time to first token includes queueing and prefill. Decode speed counts the 99 tokens after the first token and divides by the elapsed time between the first and last token callbacks. These are per-request speeds while sharing the GPU with up to three other requests, not isolated single-request speeds. They include scheduling pauses and synchronous capture writes during generation. The final job flush after the last token callback is excluded from token latency.
+
+| Measurement across 20 requests | Baseline | Capture with gzip |
+|---|---:|---:|
+| Minimum decode tokens per second | 36.171 | 14.414 |
+| Median decode tokens per second | 48.644 | 16.501 |
+| Maximum decode tokens per second | 53.286 | 17.219 |
+| Median inter-token interval, milliseconds | 20.562 | 60.602 |
+| Median time to first token, seconds | 6.296 | 14.056 |
+
+| Request | Input tokens | Baseline first token, seconds | Baseline decode tokens/sec | Capture first token, seconds | Capture decode tokens/sec |
+|---|---:|---:|---:|---:|---:|
+| 0 | 1835 | 0.331 | 46.621 | 0.331 | 16.501 |
+| 1 | 51 | 0.331 | 46.621 | 0.331 | 16.501 |
+| 2 | 26 | 0.331 | 46.621 | 0.331 | 16.501 |
+| 3 | 1641 | 0.585 | 52.955 | 0.582 | 17.219 |
+| 4 | 1396 | 2.724 | 37.574 | 6.591 | 15.155 |
+| 5 | 467 | 2.803 | 38.736 | 6.670 | 15.341 |
+| 6 | 2746 | 3.293 | 47.922 | 7.153 | 16.580 |
+| 7 | 879 | 3.402 | 50.583 | 7.268 | 16.908 |
+| 8 | 2281 | 5.761 | 36.171 | 13.522 | 14.925 |
+| 9 | 1845 | 6.100 | 41.284 | 13.858 | 15.722 |
+| 10 | 2435 | 6.492 | 49.366 | 14.255 | 16.780 |
+| 11 | 27 | 6.492 | 49.366 | 14.255 | 16.780 |
+| 12 | 775 | 8.674 | 44.014 | 20.330 | 14.414 |
+| 13 | 2252 | 9.027 | 52.207 | 20.681 | 15.191 |
+| 14 | 33 | 9.027 | 52.207 | 20.681 | 15.191 |
+| 15 | 267 | 9.065 | 53.286 | 20.720 | 15.283 |
+| 16 | 1110 | 11.137 | 40.304 | 27.395 | 15.528 |
+| 17 | 2956 | 11.629 | 50.412 | 27.885 | 16.820 |
+| 18 | 28 | 11.629 | 50.412 | 27.885 | 16.820 |
+| 19 | 291 | 11.690 | 52.029 | 27.946 | 16.996 |
+
+All 20 requests again produced 100 tokens. Capture-on and capture-off output IDs matched exactly, all 1,140 activation comparisons passed, and all 21 local tests passed. This remains one paired measurement, with no repeat-run confidence intervals.
+
+Runtime commit: `3632402daf63416f848e20ff7b019309ff4823f0`. [Per-request timing run and logs](https://modal.com/apps/a-nerdy-penguin/main/ap-th68IlbF0hfaGNN8mD9sEh).
