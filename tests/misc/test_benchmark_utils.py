@@ -50,7 +50,8 @@ class LengthTokenizer:
         return list(range(int(text.split(":")[0])))
 
 
-def test_dataset_sample_is_reproducible_balanced_and_does_not_truncate():
+@pytest.mark.parametrize("count", [8, 50])
+def test_dataset_sample_is_reproducible_balanced_and_does_not_truncate(count):
     from collections import Counter
 
     from utils import sample_wildchat_rows
@@ -58,18 +59,20 @@ def test_dataset_sample_is_reproducible_balanced_and_does_not_truncate():
     def row(text, **extra):
         return {"conversation": [{"role": "user", "content": text, "language": "English"}], **extra}
 
-    rows = [row(f"{length}:{i}") for length in (100, 500, 1500, 2500) for i in range(4)]
+    rows = [row(f"{length}:{i}") for length in (100, 500, 1500, 2500) for i in range(16)]
     # These must never enter the sample, including an overlong prompt.
     rows += [row("100:toxic", toxic=True), row("500:redacted", redacted=True), row("4000:long")]
     rows += [rows[0]]
-    a, scanned = sample_wildchat_rows(rows, LengthTokenizer(), 8, 42, 3072)
-    b, _ = sample_wildchat_rows(rows, LengthTokenizer(), 8, 42, 3072)
+    a, scanned = sample_wildchat_rows(rows, LengthTokenizer(), count, 42, 3072)
+    b, _ = sample_wildchat_rows(rows, LengthTokenizer(), count, 42, 3072)
     assert a == b
     assert scanned == len(rows)
-    assert Counter(p["length_bucket"] for p in a) == {0: 2, 1: 2, 2: 2, 3: 2}
-    assert len({p["prompt_sha256"] for p in a}) == 8
+    assert Counter(p["length_bucket"] for p in a) == {
+        bucket: count // 4 + (bucket < count % 4) for bucket in range(4)
+    }
+    assert len({p["prompt_sha256"] for p in a}) == count
     for p in a:
-        assert p["dataset_row"] < 16
+        assert p["dataset_row"] < 64
         assert len(p["token_ids"]) == int(p["user_prompt"].split(":")[0])
 
 

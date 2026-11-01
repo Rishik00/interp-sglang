@@ -8,21 +8,21 @@ GPU execution uses the existing engine, scheduler, attention backend and CUDA gr
 Run the paired uninstrumented baseline and capture experiment on a Modal T4:
 
 ```powershell
-python -X utf8 modal_test_decode.py --model-id Qwen/Qwen3-1.7B --gpu T4 --num-prompts 20 --max-tokens 100
+python -X utf8 modal_test_decode.py --model-id Qwen/Qwen3-1.7B --gpu T4 --num-prompts 50 --max-tokens 250
 ```
 
 Isolate GPU capture overhead with the same paired baseline, without offload,
 compression or activation file writes during generation:
 
 ```powershell
-python -X utf8 modal_test_decode.py --model-id Qwen/Qwen3-1.7B --gpu T4 --num-prompts 20 --max-tokens 100 --capture-sink gpu
+python -X utf8 modal_test_decode.py --model-id Qwen/Qwen3-1.7B --gpu T4 --num-prompts 50 --max-tokens 250 --capture-sink gpu
 ```
 
 Keep the blocking GPU-to-CPU transfer but disable byte serialization, compression,
 checksums and activation payload writes:
 
 ```powershell
-python -X utf8 modal_test_decode.py --model-id Qwen/Qwen3-1.7B --gpu T4 --num-prompts 20 --max-tokens 100 --capture-sink cpu
+python -X utf8 modal_test_decode.py --model-id Qwen/Qwen3-1.7B --gpu T4 --num-prompts 50 --max-tokens 250 --capture-sink cpu
 ```
 
 CPU mode discards each offloaded tensor after consumption, keeping only the final
@@ -30,7 +30,7 @@ owned CPU window for untimed reference validation. It reports the bytes offloade
 and checks that observed windows reside on CPU. Benchmark metrics still save
 locally after timing; activation files are not written in this mode.
 
-This mode recycles GPU windows rather than saving the harvest. It keeps only the
+GPU mode recycles GPU windows rather than saving the harvest. It keeps only the
 last borrowed window for an untimed CPU transfer and Transformers activation
 spot-check after generation. Its reference results explicitly cover only that
 final window; earlier windows are discarded. Token equality and captured row
@@ -39,11 +39,13 @@ still persists all windows and validates every generated position. GPU sinks
 receive a borrowed view and must finish or enqueue consumption on the inference
 stream before the window is reused.
 
-The script uses a pinned, length-stratified WildChat sample. All 28 layers'
+Both benchmark scripts now default to 50 prompts and a 250-token generation cap.
+The script uses a pinned, length-stratified WildChat sample: 13 prompts from
+each of the first two length buckets and 12 from each of the last two. All 28 layers'
 attention outputs and post-block residuals, plus the final LM-head input, are
 captured in FP16 during decode. Prefill capture is disabled. CUDA graphs remain
 enabled for batch sizes 1, 2 and 4; at most four requests run concurrently.
-Greedy generation stops at EOS or 100 sampled tokens. The terminal token gets
+Greedy generation stops at EOS or 250 sampled tokens. The terminal token gets
 one additional forward **without sampling** before its KV cache is released.
 EOS is retained in capture metadata even though normal returned text omits it.
 
@@ -87,8 +89,8 @@ python -m pytest tests/core/test_capture.py tests/misc/test_benchmark_utils.py -
 ## Prefill benchmark and reference checks
 
 ```powershell
-python -X utf8 modal_benchmark.py --gpu T4 --model-id Qwen/Qwen3-1.7B --memory-ratio 0.55 --num-prompts 8
-python -X utf8 modal_benchmark.py --mode sample --model-id Qwen/Qwen3-1.7B --num-prompts 8
+python -X utf8 modal_benchmark.py --gpu T4 --model-id Qwen/Qwen3-1.7B --memory-ratio 0.55 --num-prompts 50
+python -X utf8 modal_benchmark.py --mode sample --model-id Qwen/Qwen3-1.7B --num-prompts 50
 ```
 
 Both benchmark and validation run by default. Use `--mode benchmark` or

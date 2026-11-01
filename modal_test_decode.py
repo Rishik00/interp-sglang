@@ -144,7 +144,7 @@ def run_decode(
     capture,
     run_id,
     source_commit,
-    max_tokens=100,
+    max_tokens=250,
     window_steps=16,
     gpu_budget_mib=128,
     ignore_eos=False,
@@ -287,15 +287,15 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model-id", default="Qwen/Qwen3-1.7B")
     parser.add_argument("--gpu", default="T4")
-    parser.add_argument("--num-prompts", type=int, default=20)
-    parser.add_argument("--max-tokens", type=int, default=100)
+    parser.add_argument("--num-prompts", type=int, default=50)
+    parser.add_argument("--max-tokens", type=int, default=250)
     parser.add_argument("--window-steps", type=int, default=16)
     parser.add_argument("--gpu-budget-mib", type=int, default=128)
     parser.add_argument("--ignore-eos", action="store_true")
     parser.add_argument("--capture-sink", choices=("gzip", "gpu", "cpu"), default="gzip")
     args = parser.parse_args()
-    if args.num_prompts < 4 or args.num_prompts % 4:
-        parser.error("--num-prompts must be a multiple of four, at least four")
+    if args.num_prompts < 4:
+        parser.error("--num-prompts must be at least four")
     if not 1 <= args.max_tokens <= 1023 or args.window_steps < 1 or args.gpu_budget_mib < 1:
         parser.error("Invalid token limit, window size or capture budget")
     source_commit = subprocess.check_output(

@@ -138,8 +138,8 @@ def sample_wildchat_rows(rows, tokenizer, count: int, seed: int, max_tokens: int
     import hashlib
     import random
 
-    if count < 4 or count % 4:
-        raise ValueError("num_prompts must be a positive multiple of four (at least 4)")
+    if count < 4:
+        raise ValueError("num_prompts must be at least 4")
     if max_tokens < 2049:
         raise ValueError("Allow at least 2049 input tokens to test natural long prompts")
     bounds = (256, 1024, 2048, max_tokens)
@@ -180,13 +180,15 @@ def sample_wildchat_rows(rows, tokenizer, count: int, seed: int, max_tokens: int
     rng = random.Random(seed)
     selected = []
     for bucket, candidates in enumerate(buckets):
-        if len(candidates) < count // 4:
+        # Spread any remainder across the first buckets: 50 -> 13, 13, 12, 12.
+        needed = count // len(bounds) + (bucket < count % len(bounds))
+        if len(candidates) < needed:
             raise ValueError(
                 f"Length bucket {bucket} has only {len(candidates)} candidates; "
-                f"need {count // 4}. Increase --dataset-scan-rows."
+                f"need {needed}. Increase --dataset-scan-rows."
             )
         rng.shuffle(candidates)
-        selected.extend(candidates[: count // 4])
+        selected.extend(candidates[:needed])
     rng.shuffle(selected)
     return selected, scanned
 

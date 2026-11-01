@@ -502,9 +502,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Capture on/off benchmark and HF activation validation on Modal"
     )
-    parser.add_argument(
-        "--num-prompts", type=int, default=16, help="WildChat samples; multiple of 4"
-    )
+    parser.add_argument("--num-prompts", type=int, default=50, help="WildChat samples; at least 4")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--dataset-revision", default="c827c6df8fcf008219ffaffa4d1dd77491099367")
     parser.add_argument("--dataset-scan-rows", type=int, default=4096)
@@ -520,7 +518,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cpu", type=float, default=2.0)
     parser.add_argument("--memory", type=int, default=8192, help="Container memory in MiB")
     parser.add_argument("--timeout", type=int, default=20 * 60, help="Seconds")
-    parser.add_argument("--max-tokens", type=int, default=512, help="Generation safety cap")
+    parser.add_argument("--max-tokens", type=int, default=250, help="Generation safety cap")
 
     parser.add_argument(
         "--cache-type",
@@ -548,8 +546,8 @@ def parse_args() -> argparse.Namespace:
     )
 
     args = parser.parse_args()
-    if args.num_prompts < 4 or args.num_prompts % 4:
-        parser.error("--num-prompts must be a multiple of four, at least 4")
+    if args.num_prompts < 4:
+        parser.error("--num-prompts must be at least 4")
     if args.dataset_scan_rows < args.num_prompts:
         parser.error("--dataset-scan-rows must be at least --num-prompts")
     if not 2049 <= args.max_input_tokens <= 4092:
