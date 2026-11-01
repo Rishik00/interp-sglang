@@ -96,7 +96,7 @@ shared Windows pytest temporary-directory permission problem):
 
 ```powershell
 $env:PYTHONPATH = "$PWD/python"
-python -m pytest tests/core/test_capture.py tests/misc/test_benchmark_utils.py -q --basetemp artifacts/pytest-decode-local
+python -m pytest tests/core/test_capture.py tests/core/test_context_lifecycle.py tests/misc/test_benchmark_utils.py -q --basetemp artifacts/pytest-decode-local
 ```
 
 ## Prefill benchmark and reference checks
@@ -116,3 +116,5 @@ The completed Qwen3-1.7B T4 run, measured overhead and validation limits are
 documented in the [decode harvesting report](docs/experiment-reports/qwen3-decode-harvesting.md).
 The base Llama-3.2-1B run and validation scope are recorded in the
 [Llama decode report](docs/experiment-reports/llama3.2-1b-decode.md).
+The [3B–4B decode report](docs/experiment-reports/3b-4b-decode.md) records the
+larger Qwen and Llama runs, memory configuration and retained-window checks.
