@@ -100,3 +100,5 @@ gradient support, compression, or storage uploads to a CDN.
 
 The completed Qwen3-1.7B T4 run, measured overhead and validation limits are
 documented in the [decode harvesting report](docs/experiment-reports/qwen3-decode-harvesting.md).
+The base Llama-3.2-1B run and validation scope are recorded in the
+[Llama decode report](docs/experiment-reports/llama3.2-1b-decode.md).
