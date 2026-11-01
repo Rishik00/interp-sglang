@@ -25,6 +25,7 @@ class ActivationCaptureConfig:
     decode_window_steps: int = 16
     decode_gpu_budget_bytes: int = 128 * 1024 * 1024
     capture_terminal_token: bool = True
+    decode_offload_to_cpu: bool = True
     decode_sink: Callable[[DecodeCaptureWindow], None] | None = None
 
 
@@ -39,7 +40,11 @@ class DecodeToken:
 
 @dataclass(frozen=True)
 class DecodeCaptureWindow:
-    """An owned CPU tensor: [signals, real token rows, hidden width]."""
+    """[signals, token rows, width]; owned CPU copy or borrowed GPU window.
+
+    Without CPU offload, the tensor is only valid until the next staging write.
+    A GPU consumer must enqueue its work on the current inference stream.
+    """
 
     tensor: torch.Tensor
     keys: Tuple[Tuple[int | None, ActivationSignal], ...]
@@ -113,7 +118,7 @@ class ActivationCaptureManager:
             return
         if self.config.decode_sink is None:
             raise ValueError(
-                "Decode capture requires a sink; CPU records are not retained indefinitely"
+                "Decode capture requires a sink to consume or explicitly discard windows"
             )
         if self.config.decode_window_steps < 1 or max_batch_size < 1:
             raise ValueError("Decode window steps and batch size must be positive")
@@ -196,12 +201,14 @@ class ActivationCaptureManager:
             self.flush_decode()
 
     def flush_decode(self) -> None:
-        """Blocking offload and sink provide bounded memory and explicit backpressure."""
+        """Consume a window before recycling its bounded GPU storage."""
         if not self.decode_tokens:
             return
         assert self.decode_window is not None and self.config.decode_sink is not None
-        # A CPU clone is needed for CPU tests as well as the normal CUDA-to-CPU copy.
-        tensor = self.decode_window[:, : len(self.decode_tokens)].to("cpu", copy=True).contiguous()
+        tensor = self.decode_window[:, : len(self.decode_tokens)]
+        if self.config.decode_offload_to_cpu:
+            # Copy only in offload mode; GPU consumers borrow the existing view.
+            tensor = tensor.to("cpu", copy=True).contiguous()
         self.config.decode_sink(
             DecodeCaptureWindow(tensor, self.decode_keys, tuple(self.decode_tokens))
         )

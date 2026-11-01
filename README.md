@@ -11,6 +11,22 @@ Run the paired uninstrumented baseline and capture experiment on a Modal T4:
 python -X utf8 modal_test_decode.py --model-id Qwen/Qwen3-1.7B --gpu T4 --num-prompts 20 --max-tokens 100
 ```
 
+Isolate GPU capture overhead with the same paired baseline, without offload,
+compression or activation file writes during generation:
+
+```powershell
+python -X utf8 modal_test_decode.py --model-id Qwen/Qwen3-1.7B --gpu T4 --num-prompts 20 --max-tokens 100 --capture-sink gpu
+```
+
+This mode recycles GPU windows rather than saving the harvest. It keeps only the
+last borrowed window for an untimed CPU transfer and Transformers activation
+spot-check after generation. Its reference results explicitly cover only that
+final window; earlier windows are discarded. Token equality and captured row
+counts are checked across the full workload. The default `--capture-sink gzip`
+still persists all windows and validates every generated position. GPU sinks
+receive a borrowed view and must finish or enqueue consumption on the inference
+stream before the window is reused.
+
 The script uses a pinned, length-stratified WildChat sample. All 28 layers'
 attention outputs and post-block residuals, plus the final LM-head input, are
 captured in FP16 during decode. Prefill capture is disabled. CUDA graphs remain

@@ -351,6 +351,24 @@ def measure_decode_generation(llm, prompt_ids, sampling):
     }
 
 
+class DecodeGpuWindowObserver:
+    """Benchmark sink: recycle windows, retain only the last borrowed GPU view.
+
+    No tensor copies, CPU transfers or serialization occur in this callback.
+    The last view can be checked after generation and CUDA synchronization.
+    """
+
+    def __init__(self):
+        self.last_window = None
+        self.rows = 0
+        self.windows = 0
+
+    def __call__(self, window):
+        self.last_window = window
+        self.rows += len(window.tokens)
+        self.windows += 1
+
+
 class DecodeGzipWriter:
     """Synchronous, lossless window sink. Only one window is offloaded at a time."""
 

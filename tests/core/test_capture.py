@@ -202,6 +202,39 @@ def test_decode_sink_failure_retains_pending_window():
     assert manager.decode_stats["windows"] == 0
 
 
+def test_gpu_sink_borrows_and_recycles_storage_without_offload():
+    from utils import DecodeGpuWindowObserver
+
+    observer = DecodeGpuWindowObserver()
+    manager = ActivationCaptureManager(
+        ActivationCaptureConfig(
+            layer_ids=(),
+            capture_lm_head_input=True,
+            capture_decode=True,
+            decode_window_steps=1,
+            decode_offload_to_cpu=False,
+            decode_sink=observer,
+        )
+    )
+    manager.prepare_decode(1, 3, torch.float32, torch.device("cpu"))
+    stage_decode(manager, Batch([decode_req(10, [7])], "decode"), torch.ones(1, 3))
+    first = observer.last_window
+    # CPU-backed test buffers expose the same ownership contract without a GPU.
+    assert first.tensor.data_ptr() == manager.decode_window.data_ptr()
+    stage_decode(
+        manager,
+        Batch([decode_req(10, [7, 8])], "decode"),
+        torch.full((1, 3), 9.0),
+        terminal=True,
+    )
+    assert observer.rows == 2 and observer.windows == 2
+    assert observer.last_window.tensor.data_ptr() == first.tensor.data_ptr()
+    assert observer.last_window.tensor.tolist() == [[[9.0, 9.0, 9.0]]]
+    assert observer.last_window.tokens[0].generated_index == 1
+    assert observer.last_window.tokens[0].terminal
+    assert manager.decode_tokens == []
+
+
 def test_graph_construction_writes_static_outputs_without_harvesting():
     windows = []
     manager = ActivationCaptureManager(
