@@ -99,29 +99,3 @@ def test_reconstruction_rejects_missing_cached_prefix():
     )
     with pytest.raises(ValueError, match="gap or overlap"):
         reconstruct_capture([capture], 0, "post_residual", 0, [10, 11, 12, 13])
-
-
-def test_decode_gzip_roundtrip_is_bit_exact_and_checks_corruption(tmp_path):
-    from minisgl.capture import DecodeCaptureWindow, DecodeToken
-
-    from utils import DecodeGzipWriter, read_decode_request, read_decode_window
-
-    values = torch.tensor(
-        [float("nan"), float("inf"), -float("inf"), -0.0, 1.2, -3], dtype=torch.float16
-    ).reshape(1, 2, 3)
-    writer = DecodeGzipWriter(tmp_path / "captures")
-    writer(
-        DecodeCaptureWindow(
-            values,
-            ((None, "lm_head_input"),),
-            (DecodeToken(42, 7, 2, 0), DecodeToken(42, 8, 3, 1, True)),
-        )
-    )
-    index = writer.close()
-    recovered, tokens, keys = read_decode_request(writer.directory, index, 42)
-    assert torch.equal(recovered.view(torch.uint8), values.view(torch.uint8))
-    assert [token["token_id"] for token in tokens] == [7, 8]
-    assert keys == [(None, "lm_head_input")]
-    broken = dict(index["windows"][0], sha256="incorrect")
-    with pytest.raises(ValueError, match="checksum"):
-        read_decode_window(writer.directory, broken)

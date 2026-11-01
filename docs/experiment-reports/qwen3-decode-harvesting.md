@@ -250,3 +250,18 @@ CPU byte copy; the offload-only path does not need or perform that conversion.
 
 Runtime commit: `b0db3f995416a09900fe02b0197f13b642ef56c6`.
 [50-prompt, 250-token run and logs](https://modal.com/apps/a-nerdy-penguin/main/ap-276umZ4KE99GEdvZAU9WGp).
+
+## Compression deferred
+
+The active decode prototype now defaults to GPU-to-CPU offload only. The gzip
+writer, compressed activation readers, raw byte conversion, activation checksums
+and compression CLI mode have been removed. The GPU-only diagnostic remains
+available. The benchmark sink keeps the final window for validation and discards
+earlier windows; it does not persist activation tensors. Metrics and prompt
+manifests are still saved after timing.
+
+The defaults remain 50 prompts and a 250-token cap. All 23 remaining local tests
+pass; the removed test covered the deleted gzip round-trip path. CLI help and
+lint checks pass. The CPU offload mechanism is unchanged from the preceding
+50-prompt T4 run; no additional GPU performance run was performed for this
+cleanup. Historical results above remain as recorded.

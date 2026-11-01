@@ -5,39 +5,32 @@ GPU execution uses the existing engine, scheduler, attention backend and CUDA gr
 
 ## Decode harvesting prototype
 
-Run the paired uninstrumented baseline and capture experiment on a Modal T4:
+Run the paired uninstrumented baseline and GPU-to-CPU capture experiment on a Modal T4:
 
 ```powershell
 python -X utf8 modal_test_decode.py --model-id Qwen/Qwen3-1.7B --gpu T4 --num-prompts 50 --max-tokens 250
 ```
 
-Isolate GPU capture overhead with the same paired baseline, without offload,
-compression or activation file writes during generation:
+CPU offload is the default (`--capture-sink cpu`). There is no activation byte
+serialization, compression, checksum calculation or payload file writing.
+Each bounded GPU window is copied synchronously into an owned CPU tensor and
+consumed by the sink. The benchmark sink discards earlier windows and retains
+only the final CPU window for untimed reference validation. It does not retain
+or persist the complete activation harvest.
+
+For a GPU-only diagnostic with CPU offload disabled during generation:
 
 ```powershell
 python -X utf8 modal_test_decode.py --model-id Qwen/Qwen3-1.7B --gpu T4 --num-prompts 50 --max-tokens 250 --capture-sink gpu
 ```
 
-Keep the blocking GPU-to-CPU transfer but disable byte serialization, compression,
-checksums and activation payload writes:
-
-```powershell
-python -X utf8 modal_test_decode.py --model-id Qwen/Qwen3-1.7B --gpu T4 --num-prompts 50 --max-tokens 250 --capture-sink cpu
-```
-
-CPU mode discards each offloaded tensor after consumption, keeping only the final
-owned CPU window for untimed reference validation. It reports the bytes offloaded
-and checks that observed windows reside on CPU. Benchmark metrics still save
-locally after timing; activation files are not written in this mode.
-
 GPU mode recycles GPU windows rather than saving the harvest. It keeps only the
 last borrowed window for an untimed CPU transfer and Transformers activation
 spot-check after generation. Its reference results explicitly cover only that
 final window; earlier windows are discarded. Token equality and captured row
-counts are checked across the full workload. The default `--capture-sink gzip`
-still persists all windows and validates every generated position. GPU sinks
-receive a borrowed view and must finish or enqueue consumption on the inference
-stream before the window is reused.
+counts are checked across the full workload in both modes. GPU sinks receive a
+borrowed view and must finish or enqueue consumption on the inference stream
+before the window is reused.
 
 Both benchmark scripts now default to 50 prompts and a 250-token generation cap.
 The script uses a pinned, length-stratified WildChat sample: 13 prompts from
@@ -51,32 +44,30 @@ EOS is retained in capture metadata even though normal returned text omits it.
 
 Capture memory is reserved before sizing the KV cache. The default staging window
 flushes after 16 decode batches (or when full), with a 128 MiB GPU capture budget.
-The prototype offloads synchronously and writes independent lossless gzip chunks.
-This applies backpressure instead of retaining an unbounded queue. It supports
-one GPU and requires overlap scheduling to be disabled; the shared Modal image
+The prototype offloads synchronously, applying backpressure instead of retaining
+an unbounded queue. It supports one GPU and requires overlap scheduling to be
+disabled; the shared Modal image
 sets `MINISGL_DISABLE_OVERLAP_SCHEDULING=1`.
 
 The baseline and instrumented run use fresh containers. The instrumented run also
-checks every captured signal against a Hugging Face teacher-forced reference,
-including the terminal token, and verifies decompressed chunk checksums. Reports
-include actual throughput, generation equality, capture memory, compression sizes,
-and reference comparison failures. Numerical failures produce exit status 1.
+checks signals in the final retained window against a Hugging Face teacher-forced
+reference. Earlier discarded windows are not numerically validated. Reports
+include throughput, generation equality, capture memory, offloaded bytes and
+reference comparison failures. Numerical failures produce exit status 1.
 
 Each run also records per-request host token receipt times. Time to first token
 and completion latency start when the whole job is submitted, so they include
 queueing and prefill. Per-request decode speed is `(generated tokens - 1) /
 (last token time - first token time)`; it excludes the first token produced by
-prefill, and includes scheduling stalls, capture and synchronous writes between
+prefill, and includes scheduling stalls, capture and synchronous offloads between
 tokens. A one-token request has no decode-speed measurement. The final job flush
 after the last token callback remains part of total job time, not token latency.
 
-Results are saved locally under `artifacts/modal-traces/`. Compressed captures and
-their index persist on the `mini-sglang-cache` Modal volume under the directory
-printed in the result's storage metadata. Download a run with:
-
-```powershell
-python -m modal volume get mini-sglang-cache decode-harvest/<run-id> artifacts/decode-harvest/<run-id>
-```
+Benchmark metrics and prompt manifests are saved locally under
+`artifacts/modal-traces/` after timing. Activation tensors are not written to
+storage. Compression and activation payload storage are deferred; the old gzip
+writer, readers and CLI mode have been removed. Historical experiment reports
+and previously stored captures are unchanged.
 
 Run the local capture and utility tests (a unique temporary directory avoids a
 shared Windows pytest temporary-directory permission problem):
@@ -97,7 +88,7 @@ Both benchmark and validation run by default. Use `--mode benchmark` or
 `--mode validate` for one phase. `--mode sample` prepares a prompt manifest on CPU.
 Shared experiment helpers are in `utils.py`; decode-specific helpers have their
 own `Decode` section. This prototype does not implement paper reproductions,
-gradient support, asynchronous compression, or storage uploads to a CDN.
+gradient support, compression, or storage uploads to a CDN.
 
 The completed Qwen3-1.7B T4 run, measured overhead and validation limits are
 documented in the [decode harvesting report](docs/experiment-reports/qwen3-decode-harvesting.md).
