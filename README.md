@@ -18,6 +18,18 @@ compression or activation file writes during generation:
 python -X utf8 modal_test_decode.py --model-id Qwen/Qwen3-1.7B --gpu T4 --num-prompts 20 --max-tokens 100 --capture-sink gpu
 ```
 
+Keep the blocking GPU-to-CPU transfer but disable byte serialization, compression,
+checksums and activation payload writes:
+
+```powershell
+python -X utf8 modal_test_decode.py --model-id Qwen/Qwen3-1.7B --gpu T4 --num-prompts 20 --max-tokens 100 --capture-sink cpu
+```
+
+CPU mode discards each offloaded tensor after consumption, keeping only the final
+owned CPU window for untimed reference validation. It reports the bytes offloaded
+and checks that observed windows reside on CPU. Benchmark metrics still save
+locally after timing; activation files are not written in this mode.
+
 This mode recycles GPU windows rather than saving the harvest. It keeps only the
 last borrowed window for an untimed CPU transfer and Transformers activation
 spot-check after generation. Its reference results explicitly cover only that

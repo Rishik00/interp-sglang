@@ -351,11 +351,11 @@ def measure_decode_generation(llm, prompt_ids, sampling):
     }
 
 
-class DecodeGpuWindowObserver:
-    """Benchmark sink: recycle windows, retain only the last borrowed GPU view.
+class DecodeWindowObserver:
+    """Benchmark sink: recycle windows, retain only the last CPU or GPU tensor.
 
-    No tensor copies, CPU transfers or serialization occur in this callback.
-    The last view can be checked after generation and CUDA synchronization.
+    No additional copies or serialization occur in this callback. GPU views are
+    borrowed; offloaded CPU tensors are owned. Check the last window after timing.
     """
 
     def __init__(self):

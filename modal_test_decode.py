@@ -17,8 +17,8 @@ import modal
 from config import LOCAL_REPO, REMOTE_CACHE, app, cache_volume, dependency_image
 from modal_benchmark import prepare_workload
 from utils import (
-    DecodeGpuWindowObserver,
     DecodeGzipWriter,
+    DecodeWindowObserver,
     compare_activations,
     measure_decode_generation,
     read_decode_request,
@@ -26,7 +26,7 @@ from utils import (
 )
 
 
-def validate_decode_reference(model_id, directory, index, workload, sampled, gpu_window=None):
+def validate_decode_reference(model_id, directory, index, workload, sampled, final_window=None):
     """Teacher-force exact token IDs and compare only generated-token positions."""
     import torch
     from transformers import AutoModelForCausalLM
@@ -44,23 +44,23 @@ def validate_decode_reference(model_id, directory, index, workload, sampled, gpu
     rows = []
     matches = total_predictions = 0
     checked_token_rows = 0
-    if gpu_window is not None:
+    if final_window is not None:
         # This transfer is deliberately OUTSIDE the timed generation region.
-        final_values = gpu_window.tensor.cpu()
-        checked_requests = {token.request_id for token in gpu_window.tokens}
+        final_values = final_window.tensor.cpu()
+        checked_requests = {token.request_id for token in final_window.tokens}
     for request_id, (prompt, generated) in enumerate(zip(workload["prompts"], sampled)):
-        if gpu_window is None:
+        if final_window is None:
             actual, tokens, keys = read_decode_request(directory, index, request_id)
             indices = list(range(len(generated)))
         else:
             if request_id not in checked_requests:
                 continue
             positions = [
-                i for i, token in enumerate(gpu_window.tokens) if token.request_id == request_id
+                i for i, token in enumerate(final_window.tokens) if token.request_id == request_id
             ]
             actual = final_values[:, positions]
-            tokens = [vars(gpu_window.tokens[i]) for i in positions]
-            keys = gpu_window.keys
+            tokens = [vars(final_window.tokens[i]) for i in positions]
+            keys = final_window.keys
             indices = [token["generated_index"] for token in tokens]
         checked_token_rows += len(tokens)
         prompt_length = len(prompt["token_ids"])
@@ -125,7 +125,7 @@ def validate_decode_reference(model_id, directory, index, workload, sampled, gpu
         "hf_greedy_tokens": total_predictions,
         "token_and_position_alignment": True,
         "terminal_token_coverage": True,
-        "scope": "full_capture" if gpu_window is None else "final_gpu_window_only",
+        "scope": "full_capture" if final_window is None else "final_window_only",
         "checked_token_rows": checked_token_rows,
     }
 
@@ -161,7 +161,7 @@ def run_decode(
     layers = tuple(range(model_config.num_hidden_layers))
     directory = REMOTE_CACHE / "decode-harvest" / run_id
     writer = DecodeGzipWriter(directory) if capture and capture_sink == "gzip" else None
-    gpu_observer = DecodeGpuWindowObserver() if capture and capture_sink == "gpu" else None
+    window_observer = DecodeWindowObserver() if capture and capture_sink != "gzip" else None
     capture_config = (
         ActivationCaptureConfig(
             layer_ids=layers,
@@ -170,8 +170,8 @@ def run_decode(
             capture_decode=True,
             decode_window_steps=window_steps,
             decode_gpu_budget_bytes=gpu_budget_mib * 2**20,
-            decode_sink=writer if writer is not None else gpu_observer,
-            decode_offload_to_cpu=capture_sink == "gzip",
+            decode_sink=writer if writer is not None else window_observer,
+            decode_offload_to_cpu=capture_sink != "gpu",
         )
         if capture
         else None
@@ -237,6 +237,15 @@ def run_decode(
             assert manager.decode_stats["terminal_rows"] == len(workload["prompts"])
             assert manager.decode_stats["graph_batches"] > 0
             assert manager.decode_stats["eager_batches"] == 0
+            expected_offload = (
+                metrics["sampled_tokens"]
+                * len(manager.decode_keys)
+                * model_config.hidden_size
+                * torch.float16.itemsize
+                if capture_sink != "gpu"
+                else 0
+            )
+            assert manager.decode_stats["offloaded_bytes"] == expected_offload
             result["capture_stats"] = dict(manager.decode_stats)
             index = writer.close() if writer is not None else None
             result["storage"] = (
@@ -246,12 +255,16 @@ def run_decode(
                     **index,
                 }
                 if writer is not None
-                else {"format": "discarded_gpu_windows", "raw_bytes": 0, "compressed_bytes": 0}
+                else {
+                    "format": f"discarded_{capture_sink}_windows",
+                    "raw_bytes": 0,
+                    "compressed_bytes": 0,
+                }
             )
-            if gpu_observer is not None:
-                assert gpu_observer.rows == metrics["sampled_tokens"]
-                assert gpu_observer.windows == manager.decode_stats["windows"]
-                assert gpu_observer.last_window.tensor.is_cuda
+            if window_observer is not None:
+                assert window_observer.rows == metrics["sampled_tokens"]
+                assert window_observer.windows == manager.decode_stats["windows"]
+                assert window_observer.last_window.tensor.is_cuda == (capture_sink == "gpu")
             # Validate after timing, so reference computation is not capture overhead.
             result["reference"] = validate_decode_reference(
                 model_id,
@@ -259,7 +272,7 @@ def run_decode(
                 index,
                 workload,
                 metrics["sampled_token_ids"],
-                gpu_window=gpu_observer.last_window if gpu_observer is not None else None,
+                final_window=window_observer.last_window if window_observer is not None else None,
             )
         return result
     finally:
@@ -279,7 +292,7 @@ def main():
     parser.add_argument("--window-steps", type=int, default=16)
     parser.add_argument("--gpu-budget-mib", type=int, default=128)
     parser.add_argument("--ignore-eos", action="store_true")
-    parser.add_argument("--capture-sink", choices=("gzip", "gpu"), default="gzip")
+    parser.add_argument("--capture-sink", choices=("gzip", "gpu", "cpu"), default="gzip")
     args = parser.parse_args()
     if args.num_prompts < 4 or args.num_prompts % 4:
         parser.error("--num-prompts must be a multiple of four, at least four")
@@ -320,7 +333,7 @@ def main():
                 .get()
             )
             name = (
-                ("decode-gpu" if args.capture_sink == "gpu" else "decode-capture")
+                ("decode-capture" if args.capture_sink == "gzip" else f"decode-{args.capture_sink}")
                 if capture
                 else "decode-baseline"
             )
@@ -349,7 +362,9 @@ def main():
                 )
             )
     baseline = results["decode-baseline"]
-    captured = results["decode-gpu" if args.capture_sink == "gpu" else "decode-capture"]
+    captured = results[
+        "decode-capture" if args.capture_sink == "gzip" else f"decode-{args.capture_sink}"
+    ]
     identical = baseline["metrics"]["sampled_token_ids"] == captured["metrics"]["sampled_token_ids"]
     summary = {
         "model": args.model_id,

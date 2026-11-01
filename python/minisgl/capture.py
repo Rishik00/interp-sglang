@@ -104,6 +104,7 @@ class ActivationCaptureManager:
             "capacity_rows": 0,
             "peak_rows": 0,
             "captured_rows": 0,
+            "offloaded_bytes": 0,
             "terminal_rows": 0,
             "windows": 0,
             "graph_batches": 0,
@@ -212,6 +213,8 @@ class ActivationCaptureManager:
         self.config.decode_sink(
             DecodeCaptureWindow(tensor, self.decode_keys, tuple(self.decode_tokens))
         )
+        if self.config.decode_offload_to_cpu:
+            self.decode_stats["offloaded_bytes"] += tensor.numel() * tensor.element_size()
         # Keep the window intact if the sink raises. Shutdown can retry the flush.
         self.decode_tokens.clear()
         self.decode_steps = 0
