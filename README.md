@@ -133,3 +133,6 @@ The base Llama-3.2-1B run and validation scope are recorded in the
 [Llama decode report](docs/experiment-reports/llama3.2-1b-decode.md).
 The [3B–4B decode report](docs/experiment-reports/3b-4b-decode.md) records the
 larger Qwen and Llama runs, memory configuration and retained-window checks.
+The [consolidated prefill and decode report](docs/experiment-reports/prefill-decode-summary.md)
+collects all four models' all-layer T4 measurements, full-prompt reference checks,
+historical pipeline ablations, numeric CSV exports and links to run logs.
