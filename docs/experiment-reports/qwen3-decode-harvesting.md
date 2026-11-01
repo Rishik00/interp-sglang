@@ -202,3 +202,51 @@ storage is reused.
 
 Runtime commit: `f33e70293f3b6283bf22afd86f664d68745d0f13`.
 [CPU-offload-only run and logs](https://modal.com/apps/a-nerdy-penguin/main/ap-fb9kaQ1bLikurMPEvvhV2W).
+
+## Scale-up to 50 prompts and 250 tokens
+
+Both benchmark scripts now default to 50 WildChat prompts and a 250-token
+generation cap. The sampler supports counts that are not divisible by four:
+50 prompts are distributed as 13, 13, 12 and 12 across the existing input-length
+buckets. Sampling remains deterministic and does not truncate prompts. The
+selected inputs in this run contained 16–3,025 tokens.
+
+The paired T4 run used CPU offload without byte conversion, compression,
+checksums or activation payload writes. It produced 11,948 sampled tokens:
+46 requests reached the 250-token cap and four stopped at EOS. Capture-on and
+capture-off generated exactly the same token IDs, including EOS.
+
+| Measurement | Fresh baseline | Capture and CPU offload only |
+|---|---:|---:|
+| Median per-request decode tokens per second | 47.587 | 43.749 |
+| Minimum per-request decode tokens per second | 38.625 | 34.727 |
+| Maximum per-request decode tokens per second | 57.848 | 53.161 |
+| Median inter-token interval, milliseconds | 21.015 | 22.860 |
+| Entire generation job, seconds | 68.769 | 76.057 |
+| Aggregate sampled tokens per second | 173.741 | 157.092 |
+
+CPU-offload capture retained **91.93% of median per-request decode speed** and
+**90.42% of aggregate throughput** in this pair. This difference is larger than
+in the 20-prompt, 100-token test. These are single pairs in separate fresh T4
+containers; they do not establish a precise overhead estimate or isolate
+container performance variation from capture and offload costs.
+
+The engine captured and offloaded all 11,948 token rows, including 50 terminal
+rows, transferring 2,789,523,456 bytes (2.60 GiB) across 196 windows. There were
+3,121 CUDA graph forwards and no eager decode forwards. GPU capture storage
+remained 15.14 MiB with a 64-row capacity. KV cache integrity passed, including
+requests that ended early at EOS.
+
+Earlier CPU windows were discarded. The final retained window contained only
+one token row, so reference validation in this run is limited to that token:
+all 57 signal comparisons passed, as did its token ID, position and terminal
+metadata checks. This is not full activation validation of the 50-prompt
+workload. All 24 local capture and utility tests passed, including deterministic
+balanced sampling of exactly 50 prompts.
+
+Raw byte conversion is only needed by the current gzip and payload-writing
+implementation. It preserves FP16 values exactly but creates an additional
+CPU byte copy; the offload-only path does not need or perform that conversion.
+
+Runtime commit: `b0db3f995416a09900fe02b0197f13b642ef56c6`.
+[50-prompt, 250-token run and logs](https://modal.com/apps/a-nerdy-penguin/main/ap-276umZ4KE99GEdvZAU9WGp).
