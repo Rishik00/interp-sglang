@@ -136,3 +136,11 @@ def set_global_ctx(ctx: Context):
 def get_global_ctx() -> Context:
     assert _GLOBAL_CTX is not None, "Global context is not set"
     return _GLOBAL_CTX
+
+
+def clear_global_ctx(ctx: Context) -> None:
+    """Release the engine's global ownership after all forwards have finished."""
+    global _GLOBAL_CTX
+    assert _GLOBAL_CTX is ctx, "Cannot clear another engine's context"
+    assert ctx._batch is None, "Cannot clear context during a forward"
+    _GLOBAL_CTX = None

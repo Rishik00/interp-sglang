@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import json
 import subprocess
+from dataclasses import replace
 
 import modal
 
@@ -19,6 +20,7 @@ from utils import (
     compare_activations,
     hugging_face_modal_secrets,
     measure_decode_generation,
+    mem_cleanup,
     write_run_artifact,
 )
 
@@ -142,6 +144,7 @@ def run_decode(
     gpu_budget_mib=128,
     ignore_eos=False,
     capture_sink="cpu",
+    memory_ratio=0.45,
 ):
     import torch
     import transformers
@@ -177,7 +180,7 @@ def run_decode(
         max_extend_tokens=256,
         max_seq_len_override=4096,
         cuda_graph_bs=[1, 2, 4],
-        memory_ratio=0.45,
+        memory_ratio=memory_ratio,
         use_pynccl=False,
         activation_capture=capture_config,
     )
@@ -217,7 +220,7 @@ def run_decode(
                 "cache_type": "naive",
                 "max_extend_tokens": 256,
                 "max_seq_len": 4096,
-                "memory_ratio": 0.45,
+                "memory_ratio": memory_ratio,
                 "ignore_eos": ignore_eos,
                 "overlap": False,
                 "capture_sink": capture_sink if capture else None,
@@ -244,17 +247,33 @@ def run_decode(
             assert window_observer.rows == metrics["sampled_tokens"]
             assert window_observer.windows == manager.decode_stats["windows"]
             assert window_observer.last_window.tensor.is_cuda == (capture_sink == "gpu")
+            # Preserve just the bounded CPU window, then free serving weights,
+            # KV cache and graphs before loading another FP16 model on the T4.
+            final_window = replace(
+                window_observer.last_window,
+                tensor=window_observer.last_window.tensor.cpu(),
+            )
+            window_observer.last_window = final_window
+            llm.shutdown()
+            llm = None
+            manager = None
+            from minisgl.layers.rotary import get_rope
+
+            get_rope.cache_clear()
+            mem_cleanup()
+            result["reference_free_gpu_bytes"] = torch.cuda.mem_get_info()[0]
             # Validate after timing, so reference computation is not capture overhead.
             result["reference"] = validate_decode_reference(
                 model_id,
                 workload,
                 metrics["sampled_token_ids"],
-                final_window=window_observer.last_window,
+                final_window=final_window,
             )
         return result
     finally:
         # Finish any pending offload before destroying graphs.
-        llm.shutdown()
+        if llm is not None:
+            llm.shutdown()
         cache_volume.commit()
 
 
@@ -267,6 +286,7 @@ def main():
     parser.add_argument("--window-steps", type=int, default=16)
     parser.add_argument("--gpu-budget-mib", type=int, default=128)
     parser.add_argument("--ignore-eos", action="store_true")
+    parser.add_argument("--memory-ratio", type=float, default=0.45)
     parser.add_argument("--hf-secret", help="Existing Modal secret containing HF_TOKEN")
     parser.add_argument(
         "--capture-sink",
@@ -279,6 +299,8 @@ def main():
         parser.error("--num-prompts must be at least four")
     if not 1 <= args.max_tokens <= 1023 or args.window_steps < 1 or args.gpu_budget_mib < 1:
         parser.error("Invalid token limit, window size or capture budget")
+    if not 0 < args.memory_ratio < 1:
+        parser.error("--memory-ratio must be between 0 and 1")
     source_commit = subprocess.check_output(
         ["git", "rev-parse", "HEAD"], cwd=LOCAL_REPO, text=True
     ).strip()
@@ -313,6 +335,7 @@ def main():
                     gpu_budget_mib=args.gpu_budget_mib,
                     ignore_eos=args.ignore_eos,
                     capture_sink=args.capture_sink,
+                    memory_ratio=args.memory_ratio,
                 )
                 .get()
             )

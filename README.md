@@ -32,6 +32,20 @@ For a GPU-only diagnostic with CPU offload disabled during generation:
 python -X utf8 modal_test_decode.py --model-id Qwen/Qwen3-1.7B --gpu T4 --num-prompts 50 --max-tokens 250 --capture-sink gpu
 ```
 
+The 3B–4B models need a larger serving memory budget on T4:
+
+```powershell
+python -X utf8 modal_test_decode.py --model-id Qwen/Qwen3-4B --gpu T4 --memory-ratio 0.75
+python -X utf8 modal_test_decode.py --model-id meta-llama/Llama-3.2-3B --gpu T4 --memory-ratio 0.75
+```
+
+These commands use the same 50-prompt, 250-token defaults. Load the authorized
+HF token into `HF_TOKEN` before the Llama command, or pass `--hf-secret`.
+After capture timing, the runner retains the final CPU window and tears down
+the serving engine before loading the Transformers reference. This avoids
+holding two FP16 model copies and the serving KV cache on the T4 simultaneously.
+The default serving memory ratio remains 0.45 for the smaller checkpoints.
+
 GPU mode recycles GPU windows rather than saving the harvest. It keeps only the
 last borrowed window for an untimed CPU transfer and Transformers activation
 spot-check after generation. Its reference results explicitly cover only that

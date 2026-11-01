@@ -6,7 +6,7 @@ from typing import Any, Dict, NamedTuple, Tuple
 import torch
 from minisgl.attention import create_attention_backend
 from minisgl.capture import ActivationCaptureManager
-from minisgl.core import Batch, Context, Req, set_global_ctx
+from minisgl.core import Batch, Context, Req, clear_global_ctx, set_global_ctx
 from minisgl.distributed import destroy_distributed, enable_pynccl_distributed, set_tp_info
 from minisgl.kvcache import create_kvcache_pool
 from minisgl.layers import set_rope_device
@@ -267,6 +267,7 @@ class Engine:
         self.graph_runner.destroy_cuda_graphs()
         torch.distributed.destroy_process_group()
         destroy_distributed()
+        clear_global_ctx(self.ctx)
 
 
 def _align_up_32(num: int) -> int:
