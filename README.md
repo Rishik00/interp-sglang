@@ -18,6 +18,14 @@ consumed by the sink. The benchmark sink discards earlier windows and retains
 only the final CPU window for untimed reference validation. It does not retain
 or persist the complete activation harvest.
 
+For gated Llama weights, the runner privately forwards the locally cached HF
+credential or `HF_TOKEN` environment variable to both preparation and GPU jobs.
+The account must already have model access. To use an existing Modal secret:
+
+```powershell
+python -X utf8 modal_test_decode.py --model-id meta-llama/Llama-3.2-1B --gpu T4 --hf-secret <secret-name>
+```
+
 For a GPU-only diagnostic with CPU offload disabled during generation:
 
 ```powershell

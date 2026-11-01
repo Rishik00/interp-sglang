@@ -17,6 +17,7 @@ from modal_benchmark import prepare_workload
 from utils import (
     DecodeWindowObserver,
     compare_activations,
+    hugging_face_modal_secrets,
     measure_decode_generation,
     write_run_artifact,
 )
@@ -266,6 +267,7 @@ def main():
     parser.add_argument("--window-steps", type=int, default=16)
     parser.add_argument("--gpu-budget-mib", type=int, default=128)
     parser.add_argument("--ignore-eos", action="store_true")
+    parser.add_argument("--hf-secret", help="Existing Modal secret containing HF_TOKEN")
     parser.add_argument(
         "--capture-sink",
         choices=("cpu", "gpu"),
@@ -282,20 +284,25 @@ def main():
     ).strip()
     results = {}
     output_dir = LOCAL_REPO / "artifacts" / "modal-traces"
+    secrets = hugging_face_modal_secrets(args.hf_secret)
     with modal.enable_output(), app.run(detach=True):
-        workload = prepare_workload.spawn(
-            args.model_id,
-            {
-                "count": args.num_prompts,
-                "seed": 42,
-                "revision": "c827c6df8fcf008219ffaffa4d1dd77491099367",
-                "max_tokens": 3072,
-                "scan_rows": 4096,
-            },
-        ).get()
+        workload = (
+            prepare_workload.with_options(secrets=secrets)
+            .spawn(
+                args.model_id,
+                {
+                    "count": args.num_prompts,
+                    "seed": 42,
+                    "revision": "c827c6df8fcf008219ffaffa4d1dd77491099367",
+                    "max_tokens": 3072,
+                    "scan_rows": 4096,
+                },
+            )
+            .get()
+        )
         for capture in (False, True):
             result = (
-                run_decode.with_options(gpu=args.gpu)
+                run_decode.with_options(gpu=args.gpu, secrets=secrets)
                 .spawn(
                     model_id=args.model_id,
                     workload=workload,

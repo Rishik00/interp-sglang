@@ -277,6 +277,18 @@ def reconstruct_capture(captures, layer, signal, request_id: int, ids: list[int]
 # ================================ Decode ================================
 
 
+def hugging_face_modal_secrets(secret_name=None):
+    """Forward HF credentials privately to both dataset preparation and GPU jobs."""
+    import modal
+
+    if secret_name:
+        return [modal.Secret.from_name(secret_name, required_keys=["HF_TOKEN"])]
+    from huggingface_hub import get_token
+
+    token = get_token()
+    return [modal.Secret.from_dict({"HF_TOKEN": token})] if token else []
+
+
 def decode_request_timing(request_id, input_tokens, token_receipt_seconds):
     """Host-observed latency from job submission, and first-to-last token speed."""
     count = len(token_receipt_seconds)

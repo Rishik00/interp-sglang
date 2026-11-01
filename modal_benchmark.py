@@ -40,6 +40,7 @@ from config import (
 from utils import (
     capture_layers,
     compare_activations,
+    hugging_face_modal_secrets,
     load_wildchat_prompts,
     mem_cleanup,
     memory_snapshot,
@@ -563,14 +564,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     options = {"gpu": args.gpu, "cpu": args.cpu, "memory": args.memory, "timeout": args.timeout}
-    if args.hf_secret:
-        options["secrets"] = [modal.Secret.from_name(args.hf_secret, required_keys=["HF_TOKEN"])]
-    else:
-        from huggingface_hub import get_token
-
-        token = get_token()
-        if token:
-            options["secrets"] = [modal.Secret.from_dict({"HF_TOKEN": token})]
+    options["secrets"] = hugging_face_modal_secrets(args.hf_secret)
     runner = run_benchmark.with_options(**options)
     modes = ("benchmark", "validate") if args.mode == "both" else (args.mode,)
     failed = False
