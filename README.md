@@ -102,12 +102,27 @@ python -m pytest tests/core/test_capture.py tests/core/test_context_lifecycle.py
 ## Prefill benchmark and reference checks
 
 ```powershell
-python -X utf8 modal_benchmark.py --gpu T4 --model-id Qwen/Qwen3-1.7B --memory-ratio 0.55 --num-prompts 50
+python -X utf8 modal_benchmark.py --gpu T4 --model-id Qwen/Qwen3-1.7B --memory-ratio 0.45 --all-layers --max-extend-tokens 256
+python -X utf8 modal_benchmark.py --gpu T4 --model-id Qwen/Qwen3-4B --memory-ratio 0.75 --all-layers --max-extend-tokens 256
+python -X utf8 modal_benchmark.py --gpu T4 --model-id meta-llama/Llama-3.2-1B --memory-ratio 0.45 --all-layers --max-extend-tokens 256
+python -X utf8 modal_benchmark.py --gpu T4 --model-id meta-llama/Llama-3.2-3B --memory-ratio 0.75 --all-layers --max-extend-tokens 256
 python -X utf8 modal_benchmark.py --mode sample --model-id Qwen/Qwen3-1.7B --num-prompts 50
 ```
 
 Both benchmark and validation run by default. Use `--mode benchmark` or
 `--mode validate` for one phase. `--mode sample` prepares a prompt manifest on CPU.
+Both use 50 prompts and a 250-token generation cap by default. Performance runs
+one prompt at a time and alternates capture-on/off order. Prefill clones stay
+on GPU until generation ends, then offload in a separately timed drain. This
+differs from windowed decode harvesting and its four-request throughput test.
+`--all-layers` captures every layer; omitting it retains the older six-depth
+sampling. Validation checks every prompt plus a two-request case, with three
+generated steps solely for alignment checks. It uses 64 GiB host RAM by default
+(`--validation-memory 65536`) to retain full CPU captures, releases serving
+allocations before loading the reference, and never compresses activation data.
+Single-token EOS requests have no decode-rate value and are excluded from
+decode-rate medians. Numerical activation checks and HF first-token agreement
+are reported separately, with a combined pass flag retaining both requirements.
 Shared experiment helpers are in `utils.py`; decode-specific helpers have their
 own `Decode` section. This prototype does not implement paper reproductions,
 gradient support, compression, or storage uploads to a CDN.

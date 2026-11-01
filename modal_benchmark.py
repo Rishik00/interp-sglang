@@ -9,9 +9,8 @@ Usage (both phases by default):
     python modal_benchmark.py --gpu T4 --model-id meta-llama/Llama-3.2-1B-Instruct
     python modal_benchmark.py --mode validate --model-id Qwen/Qwen3-1.7B
 
-Benchmark sizing flags apply to the benchmark phase. Validation deliberately uses
-naive caching, 256-token chunks, two concurrent requests, and a 0.45 memory ratio
-so both the serving engine and the Hugging Face reference fit on a T4.
+Validation uses naive caching, 256-token chunks and two concurrent requests.
+Serving allocations are released before loading the reference on the same T4.
 """
 
 from __future__ import annotations
@@ -19,7 +18,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import statistics
+import subprocess
 import time
 from dataclasses import asdict
 from typing import TYPE_CHECKING, Any
@@ -42,6 +41,7 @@ from utils import (
     compare_activations,
     hugging_face_modal_secrets,
     load_wildchat_prompts,
+    median,
     mem_cleanup,
     memory_snapshot,
     reconstruct_capture,
@@ -106,6 +106,8 @@ def run_once(
     finally:
         llm.send_result = original_send_result
     generation_finished = time.perf_counter()
+    peak_allocated_bytes = torch.cuda.max_memory_allocated()
+    peak_reserved_bytes = torch.cuda.max_memory_reserved()
 
     if first_token_at is None or last_token_at is None or final_token_id is None:
         raise RuntimeError("No generated tokens were observed")
@@ -154,11 +156,14 @@ def run_once(
         "generated_steps_including_terminal": generated_steps,
         "returned_token_count": len(result[0]["token_ids"]),
         "finish_reason": "eos" if reached_eos else "length",
+        "terminal_token_id": final_token_id,
         "reached_eos": reached_eos,
         "ttft_seconds": ttft_seconds,
         "prefill_tokens_per_second": len(ids) / ttft_seconds,
         "decode_tokens_per_second": (
-            (generated_steps - 1) / decode_seconds if decode_seconds > 0 else float("inf")
+            (generated_steps - 1) / decode_seconds
+            if generated_steps > 1 and decode_seconds > 0
+            else None
         ),
         "generation_seconds": generation_seconds,
         "drain_seconds": drain_finished - drain_started,
@@ -166,6 +171,8 @@ def run_once(
         / (generation_seconds + drain_finished - drain_started),
         "capture_bytes": capture_bytes,
         "peak_driver_used_bytes": peak_driver_used,
+        "peak_allocated_bytes": peak_allocated_bytes,
+        "peak_reserved_bytes": peak_reserved_bytes,
         # Retain lifecycle snapshots to distinguish staged capture memory from
         # memory remaining after drain and explicit release.
         "memory_before": memory_before,
@@ -175,10 +182,12 @@ def run_once(
         "result_text": result[0]["text"],
         "result_token_ids": result[0]["token_ids"],
     }
+    decode_rate = row["decode_tokens_per_second"]
+    decode_label = f"{decode_rate:.2f}" if decode_rate is not None else "n/a"
     print(
         f"[benchmark] prompt={index} capture={capture} input={len(ids)} "
         f"generated={generated_steps} finish={row['finish_reason']} "
-        f"ttft={ttft_seconds:.6f}s decode_tps={row['decode_tokens_per_second']:.2f} "
+        f"ttft={ttft_seconds:.6f}s decode_tps={decode_label} "
         f"artifact={capture_bytes / 2**20:.2f}MiB",
         flush=True,
     )
@@ -244,7 +253,12 @@ def benchmark_model(
             ]
             off = next(row for row in pair if not row["capture"])
             on = next(row for row in pair if row["capture"])
-            if off["result_token_ids"] != on["result_token_ids"]:
+            if (
+                off["result_token_ids"] != on["result_token_ids"]
+                or off["terminal_token_id"] != on["terminal_token_id"]
+                or off["generated_steps_including_terminal"]
+                != on["generated_steps_including_terminal"]
+            ):
                 raise RuntimeError(f"Capture changed greedy output for prompt {index}")
             rows.extend(pair)
 
@@ -263,9 +277,11 @@ def benchmark_model(
                     "finish_reason": on["finish_reason"],
                     "ttft_overhead_percent": (on["ttft_seconds"] / off["ttft_seconds"] - 1) * 100,
                     "decode_tps_change_percent": (
-                        on["decode_tokens_per_second"] / off["decode_tokens_per_second"] - 1
-                    )
-                    * 100,
+                        (on["decode_tokens_per_second"] / off["decode_tokens_per_second"] - 1) * 100
+                        if off["decode_tokens_per_second"] is not None
+                        and on["decode_tokens_per_second"] is not None
+                        else None
+                    ),
                     "peak_driver_used_delta_bytes": (
                         on["peak_driver_used_bytes"] - off["peak_driver_used_bytes"]
                     ),
@@ -279,6 +295,16 @@ def benchmark_model(
             "capture_layers": layers,
             "capture_signals": ("attention_output", "post_residual", "lm_head_input"),
             "capture_scope": "prefill_only",
+            "dtype": "float16",
+            "config": {
+                "cache_type": cache_type,
+                "max_extend_tokens": max_extend_tokens,
+                "max_running_req": max_running_req,
+                "max_seq_len": max_seq_len,
+                "memory_ratio": memory_ratio,
+                "cuda_graph_batches": sorted(llm.engine.graph_runner.graph_map),
+                "overlap": False,
+            },
             "max_tokens_safety_cap": max_tokens,
             "workload": workload,
             "prompts": workload["prompts"],
@@ -287,7 +313,7 @@ def benchmark_model(
             "median_capture_off": off_summary,
             "median_capture_on": on_summary,
             "median_paired": {
-                key: statistics.median(float(pair[key]) for pair in pairs)
+                key: median(pairs, key)
                 for key in (
                     "ttft_overhead_percent",
                     "decode_tps_change_percent",
@@ -305,7 +331,9 @@ def benchmark_model(
         llm.shutdown()
 
 
-def validate_model(model_id: str, layers: tuple[int, ...], workload: dict[str, Any]) -> dict:
+def validate_model(
+    model_id: str, layers: tuple[int, ...], workload: dict[str, Any], memory_ratio: float
+) -> dict:
     import torch
     import transformers
     from minisgl.capture import ActivationCaptureConfig
@@ -328,7 +356,7 @@ def validate_model(model_id: str, layers: tuple[int, ...], workload: dict[str, A
         max_extend_tokens=256,
         max_running_req=2,
         max_seq_len_override=4096,
-        memory_ratio=0.45,
+        memory_ratio=memory_ratio,
         use_pynccl=False,
         activation_capture=ActivationCaptureConfig(layer_ids=layers, capture_lm_head_input=True),
     )
@@ -348,6 +376,19 @@ def validate_model(model_id: str, layers: tuple[int, ...], workload: dict[str, A
             saved.append((name, prompts, on, captures))
             print(f"[validate] captured {name}: {len(captures)} records", flush=True)
 
+        saved_cpu_capture_bytes = sum(
+            capture.tensor.numel() * capture.tensor.element_size()
+            for _, _, _, captures in saved
+            for capture in captures
+        )
+        llm.shutdown()
+        llm = None
+        manager = None
+        from minisgl.layers.rotary import get_rope
+
+        get_rope.cache_clear()
+        mem_cleanup()
+        reference_free_gpu_bytes = torch.cuda.mem_get_info()[0]
         # Hook the actual block outputs: HF's final hidden_states entry is
         # normalized, whereas our final post_residual is BEFORE the final norm.
         reference = (
@@ -424,6 +465,7 @@ def validate_model(model_id: str, layers: tuple[int, ...], workload: dict[str, A
                         actual.shape == expected.shape == (len(ids), reference.config.hidden_size)
                     )
                     metrics = compare_activations(actual, expected, thresholds)
+                    metrics["activation_passed"] = metrics["passed"]
                     metrics["passed"] &= first_token_matches
                     rows.append(
                         {
@@ -449,6 +491,9 @@ def validate_model(model_id: str, layers: tuple[int, ...], workload: dict[str, A
             "metric_dtype": "float64",
             "layers": layers,
             "thresholds": thresholds,
+            "memory_ratio": memory_ratio,
+            "saved_cpu_capture_bytes": saved_cpu_capture_bytes,
+            "reference_free_gpu_bytes": reference_free_gpu_bytes,
             "workload": workload,
             "cases": metadata,
             "rows": rows,
@@ -456,7 +501,8 @@ def validate_model(model_id: str, layers: tuple[int, ...], workload: dict[str, A
             "all_passed": all(r["passed"] for r in rows),
         }
     finally:
-        llm.shutdown()
+        if llm is not None:
+            llm.shutdown()
 
 
 @app.function(
@@ -488,15 +534,27 @@ def prepare_workload(model_id: str, dataset_options: dict[str, Any]) -> dict[str
     volumes={str(REMOTE_CACHE): cache_volume},
     single_use_containers=True,
 )
-def run_benchmark(mode: str, model_id: str, workload: dict[str, Any], **kwargs) -> dict[str, Any]:
+def run_benchmark(
+    mode: str,
+    model_id: str,
+    workload: dict[str, Any],
+    all_layers: bool = False,
+    source_commit: str | None = None,
+    **kwargs,
+) -> dict[str, Any]:
     from transformers import AutoConfig
 
-    layers = capture_layers(AutoConfig.from_pretrained(model_id).num_hidden_layers)
+    depth = AutoConfig.from_pretrained(model_id).num_hidden_layers
+    layers = tuple(range(depth)) if all_layers else capture_layers(depth)
     if mode == "validate":
-        return validate_model(model_id, layers, workload)
-    if mode == "benchmark":
-        return benchmark_model(model_id=model_id, layers=layers, workload=workload, **kwargs)
-    raise ValueError(f"Unknown mode: {mode}")
+        result = validate_model(model_id, layers, workload, kwargs.get("memory_ratio", 0.45))
+    elif mode == "benchmark":
+        result = benchmark_model(model_id=model_id, layers=layers, workload=workload, **kwargs)
+    else:
+        raise ValueError(f"Unknown mode: {mode}")
+    result["source_commit"] = source_commit
+    result["layer_selection"] = "all" if all_layers else "sampled"
+    return result
 
 
 def parse_args() -> argparse.Namespace:
@@ -505,6 +563,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--num-prompts", type=int, default=50, help="WildChat samples; at least 4")
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--all-layers", action="store_true", help="Capture every decoder layer")
     parser.add_argument("--dataset-revision", default="c827c6df8fcf008219ffaffa4d1dd77491099367")
     parser.add_argument("--dataset-scan-rows", type=int, default=4096)
     parser.add_argument("--max-input-tokens", type=int, default=3072)
@@ -517,8 +576,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--gpu", default="T4", help="Modal GPU type, e.g. T4, L4, A10G")
     parser.add_argument("--model-id", type=str, default="Qwen/Qwen3-0.6B")
     parser.add_argument("--cpu", type=float, default=2.0)
-    parser.add_argument("--memory", type=int, default=8192, help="Container memory in MiB")
-    parser.add_argument("--timeout", type=int, default=20 * 60, help="Seconds")
+    parser.add_argument("--memory", type=int, default=16384, help="Benchmark host memory in MiB")
+    parser.add_argument(
+        "--validation-memory", type=int, default=65536, help="Validation host memory in MiB"
+    )
+    parser.add_argument("--timeout", type=int, default=60 * 60, help="Seconds per phase")
     parser.add_argument("--max-tokens", type=int, default=250, help="Generation safety cap")
 
     parser.add_argument(
@@ -563,6 +625,9 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    source_commit = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=LOCAL_REPO, text=True
+    ).strip()
     options = {"gpu": args.gpu, "cpu": args.cpu, "memory": args.memory, "timeout": args.timeout}
     options["secrets"] = hugging_face_modal_secrets(args.hf_secret)
     runner = run_benchmark.with_options(**options)
@@ -590,7 +655,7 @@ def main() -> None:
             return
         for mode in modes:
             kwargs = (
-                {}
+                {"memory_ratio": args.memory_ratio}
                 if mode == "validate"
                 else {
                     "max_tokens": args.max_tokens,
@@ -603,7 +668,18 @@ def main() -> None:
                 }
             )
             kwargs["workload"] = workload
-            result = runner.spawn(mode=mode, model_id=args.model_id, **kwargs).get()
+            phase_runner = (
+                run_benchmark.with_options(**{**options, "memory": args.validation_memory})
+                if mode == "validate"
+                else runner
+            )
+            result = phase_runner.spawn(
+                mode=mode,
+                model_id=args.model_id,
+                all_layers=args.all_layers,
+                source_commit=source_commit,
+                **kwargs,
+            ).get()
             path = write_run_artifact(result, LOCAL_REPO / "artifacts" / "modal-traces", mode)
             print(f"Results: {path}")
             if mode == "validate":

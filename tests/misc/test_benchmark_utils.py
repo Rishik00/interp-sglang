@@ -4,6 +4,16 @@ import torch
 from utils import capture_layers, compare_activations
 
 
+def test_prefill_medians_exclude_requests_without_decode_intervals():
+    from utils import median
+
+    rows = [{"rate": None}, {"rate": 10.0}, {"rate": 20.0}, {"rate": None}]
+    assert median(rows, "rate") == 15.0
+    assert median([{"rate": None}], "rate") is None
+    with pytest.raises(ValueError, match="no benchmark rows"):
+        median([], "rate")
+
+
 def test_request_timing_separates_queue_and_prefill_from_decode():
     from utils import decode_request_timing
 

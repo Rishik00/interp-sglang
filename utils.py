@@ -57,13 +57,14 @@ def mem_cleanup():
     torch.cuda.reset_peak_memory_stats()
 
 
-def median(rows: list[dict[str, Any]], key: str) -> float:
+def median(rows: list[dict[str, Any]], key: str) -> float | None:
     if not rows:
         raise ValueError(f"Cannot summarize {key}: no benchmark rows")
-    return statistics.median(float(row[key]) for row in rows)
+    values = [float(row[key]) for row in rows if row[key] is not None]
+    return statistics.median(values) if values else None
 
 
-def summarize_medians(rows: list[dict[str, Any]], capture: bool) -> dict[str, float]:
+def summarize_medians(rows: list[dict[str, Any]], capture: bool) -> dict[str, float | None]:
     selected = [row for row in rows if row["capture"] is capture]
     keys = (
         "ttft_seconds",
@@ -73,6 +74,8 @@ def summarize_medians(rows: list[dict[str, Any]], capture: bool) -> dict[str, fl
         "drain_seconds",
         "end_to_end_tokens_per_second",
         "peak_driver_used_bytes",
+        "peak_allocated_bytes",
+        "peak_reserved_bytes",
     )
     return {key: median(selected, key) for key in keys}
 
