@@ -117,3 +117,47 @@ A subsequent run measured CPU-observed token receipt times for every request. Al
 All 20 requests again produced 100 tokens. Capture-on and capture-off output IDs matched exactly, all 1,140 activation comparisons passed, and all 21 local tests passed. This remains one paired measurement, with no repeat-run confidence intervals.
 
 Runtime commit: `3632402daf63416f848e20ff7b019309ff4823f0`. [Per-request timing run and logs](https://modal.com/apps/a-nerdy-penguin/main/ap-th68IlbF0hfaGNN8mD9sEh).
+
+## GPU-buffer-only isolation
+
+To test whether GPU capture itself caused the slowdown, a fresh paired run kept
+the CUDA graph capture copies, GPU staging copies, token metadata, window
+rotation and final-token forward, while removing CPU activation transfers,
+compression and activation file writes from the timed region. The same 20
+WildChat prompts, four-request concurrency limit, 100-token generation limit,
+T4, FP16 and 57 captured vectors per token were used.
+
+| Measurement | Fresh baseline | GPU buffers only |
+|---|---:|---:|
+| Median per-request decode tokens per second | 49.156 | 48.713 |
+| Minimum per-request decode tokens per second | 36.665 | 36.302 |
+| Maximum per-request decode tokens per second | 53.769 | 53.307 |
+| Median inter-token interval, milliseconds | 20.348 | 20.533 |
+| Entire generation job, seconds | 13.479 | 13.639 |
+| Aggregate sampled tokens per second | 148.377 | 146.644 |
+
+GPU-only capture retained **99.10% of median per-request decode speed** and
+**98.83% of aggregate job throughput**. Removing the downstream offload and
+storage work brought performance close to baseline. This points to that
+downstream pipeline as the source of most of the earlier regression, rather
+than the GPU buffer copies. The experiment does not separate CPU transfer,
+compression and file-writing costs from each other. It is one paired run, so
+the roughly one-percent difference is not a precise or statistically established
+estimate of GPU capture overhead.
+
+All 2,000 generated token IDs matched the uninstrumented baseline. The engine
+captured 2,000 rows, including 20 terminal rows, through 500 CUDA graph forwards,
+with no eager decode forwards. It recycled 32 windows and kept the same
+15.14 MiB capture allocation. The KV cache integrity check passed.
+
+No activation payload was transferred to CPU or saved during timed generation.
+Earlier windows were discarded as they were recycled. Only the final borrowed
+GPU window was retained, synchronized, and copied to CPU after timing ended.
+All **228 of 228 comparisons** on its **16 token rows across four requests**
+passed the unchanged Transformers thresholds, including token ID, position and
+terminal-token checks. This is a final-window spot-check, not full-harvest
+activation validation. The benchmark also passed all 22 local capture and
+utility tests, including a new storage-reuse test for the borrowed window.
+
+Runtime commit: `44bfe0e593df35fa10387d6a0848036a83f44814`.
+[GPU-only isolation run and logs](https://modal.com/apps/a-nerdy-penguin/main/ap-3QlgljB0KcFAQdEYiMGqAy).
