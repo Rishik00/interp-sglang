@@ -48,6 +48,8 @@ dependency_image = (
         copy=False,
         ignore=[
             ".git/**",
+            ".env*",
+            "**/.env*",
             ".venv/**",
             ".pytest_cache/**",
             ".ruff_cache/**",
