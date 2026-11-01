@@ -161,3 +161,44 @@ utility tests, including a new storage-reuse test for the borrowed window.
 
 Runtime commit: `44bfe0e593df35fa10387d6a0848036a83f44814`.
 [GPU-only isolation run and logs](https://modal.com/apps/a-nerdy-penguin/main/ap-3QlgljB0KcFAQdEYiMGqAy).
+
+## CPU offload without serialization or storage
+
+The next paired T4 run retained the blocking GPU-to-CPU copies but disabled
+activation byte conversion, gzip, SHA-256 checksums and payload file writes.
+Each CPU tensor was discarded after consumption, except for the final window
+retained for untimed validation. The same prompts, concurrency, capture signals,
+window size and generation limit were used.
+
+| Measurement | Fresh baseline | Capture and CPU offload only |
+|---|---:|---:|
+| Median per-request decode tokens per second | 48.623 | 48.410 |
+| Minimum per-request decode tokens per second | 36.362 | 36.093 |
+| Maximum per-request decode tokens per second | 53.098 | 52.684 |
+| Median inter-token interval, milliseconds | 20.571 | 20.663 |
+| Entire generation job, seconds | 13.539 | 13.729 |
+| Aggregate sampled tokens per second | 147.725 | 145.681 |
+
+Capture with blocking CPU offload retained **99.56% of median per-request decode
+speed** and **98.62% of aggregate job throughput**. This transferred exactly
+466,944,000 bytes (445.3125 MiB) across 32 windows during timed generation. It
+used 500 CUDA graph forwards, captured all 2,000 rows including 20 terminal rows,
+and kept the same 15.14 MiB GPU capture allocation. No activation payload was
+saved. Metrics were written locally after timing.
+
+The large earlier regression is therefore associated with the subsequent
+serialization, compression and payload-writing work as a group. Blocking CPU
+offload alone stayed close to baseline in this configuration. These separate
+paired runs do not isolate the individual contributions of byte conversion,
+compression, hashing or file writing, and the small differences near baseline
+are not precise overhead estimates from repeated trials.
+
+All 2,000 generated token IDs matched baseline, and KV cache integrity passed.
+All 228 comparisons for the final 16 token rows across four requests passed
+the unchanged reference thresholds. Earlier CPU windows were discarded, so
+activation parity covers the final window only. All 23 local tests passed,
+including a check that offloaded CPU tensors remain valid when GPU staging
+storage is reused.
+
+Runtime commit: `f33e70293f3b6283bf22afd86f664d68745d0f13`.
+[CPU-offload-only run and logs](https://modal.com/apps/a-nerdy-penguin/main/ap-fb9kaQ1bLikurMPEvvhV2W).
