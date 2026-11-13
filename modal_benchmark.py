@@ -207,6 +207,9 @@ def benchmark_model(
     layers: tuple[int, ...],
     workload: dict[str, Any],
 ) -> dict[str, Any]:
+    # Prefix reuse skips activations needed for complete prompt reconstruction.
+    if cache_type != "naive":
+        raise ValueError("Activation benchmarking currently supports only the naive cache")
 
     import torch
     from minisgl.capture import ActivationCaptureConfig
@@ -585,9 +588,9 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument(
         "--cache-type",
-        choices=("naive", "radix"),
+        choices=("naive",),
         default="naive",
-        help="Prefix-cache implementation",
+        help="Cache implementation (only naive is supported for activation benchmarking)",
     )
     parser.add_argument(
         "--max-extend-tokens", type=int, default=3072, help="Maximum prefill extension size"

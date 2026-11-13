@@ -151,20 +151,22 @@ These historical Qwen3-1.7B runs used 20 prompts and a 100-token cap, producing 
 
 The historical gzip level-1 writer stored 433,760,280 bytes from 466,944,000 raw bytes: 1.0765:1 compression, saving 7.1066%. Its blocking write path took 20.238 seconds. In the discard modes, zero stored bytes means no activation file was written; it is not a compression ratio. Compression, checksums and activation-file writes have since been removed.
 
-## Numeric exports and run logs
+## Local numeric exports and run logs
+
+CSV exports are kept locally and ignored by Git. Only the Markdown reports are committed.
 
 | Export | Contents |
 |---|---|
-| [Prefill summary](prefill-summary.csv) | Eight model/mode rows, timings, payload sizes and memory peaks |
-| [Prefill per-request measurements](prefill-per-request.csv) | 400 rows, including memory snapshots and dataset row identifiers |
-| [Paired prefill changes](prefill-paired.csv) | 200 capture-on/off comparisons |
-| [Full-prompt activation comparisons](prefill-activation-metrics.csv) | Every layer/signal comparison, unrounded metrics and pass flags |
-| [Activation validation summary](activation-validation-summary.csv) | Eight model/phase rows, extrema, token coverage, thresholds and reference memory |
-| [Decode summary](decode-summary.csv) | Eight model/mode rows, job timings, memory and capture statistics |
-| [Decode per-request measurements](decode-per-request.csv) | 400 rows, first-token and completion times, decode rates and mean inter-token gaps |
-| [Retained-window decode comparisons](decode-activation-metrics.csv) | 220 signal comparisons with token-row coverage |
-| [Historical pipeline ablations](decode-ablations.csv) | Three separate 20-prompt pipeline measurements |
-| [Run index](benchmark-run-index.csv) | Source revisions, raw result identifiers, configuration and Modal logs |
+| Prefill summary | Eight model/mode rows, timings, payload sizes and memory peaks |
+| Prefill per-request measurements | 400 rows, including memory snapshots and dataset row identifiers |
+| Paired prefill changes | 200 capture-on/off comparisons |
+| Full-prompt activation comparisons | Every layer/signal comparison, unrounded metrics and pass flags |
+| Activation validation summary | Eight model/phase rows, extrema, token coverage, thresholds and reference memory |
+| Decode summary | Eight model/mode rows, job timings, memory and capture statistics |
+| Decode per-request measurements | 400 rows, first-token and completion times, decode rates and mean inter-token gaps |
+| Retained-window decode comparisons | 220 signal comparisons with token-row coverage |
+| Historical pipeline ablations | Three separate 20-prompt pipeline measurements |
+| Run index | Source revisions, raw result identifiers, configuration and Modal logs |
 
 | Model | Prefill performance and validation | Decode |
 |---|---|---|

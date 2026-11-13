@@ -112,6 +112,8 @@ python -X utf8 modal_benchmark.py --mode sample --model-id Qwen/Qwen3-1.7B --num
 Both benchmark and validation run by default. Use `--mode benchmark` or
 `--mode validate` for one phase. `--mode sample` prepares a prompt manifest on CPU.
 Both use 50 prompts and a 250-token generation cap by default. Performance runs
+support only `--cache-type naive`; prefix reuse would skip prompt activations.
+CSV measurements stay local and are ignored by Git. Performance testing uses
 one prompt at a time and alternates capture-on/off order. Prefill clones stay
 on GPU until generation ends, then offload in a separately timed drain. This
 differs from windowed decode harvesting and its four-request throughput test.

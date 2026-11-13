@@ -11,6 +11,9 @@ __pycache__/
 *.json
 *.jsonl
 
+# Keep experiment data local; commit Markdown reports only.
+*.csv
+
 # profiling data
 *.nsys-rep
 *.ncu-rep
