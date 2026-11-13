@@ -5,9 +5,6 @@ from typing import Any, Iterable
 
 import torch
 
-
-# Review: it should be mentioned at which step are we logging at. 
-# I think we're logging the engine's 
 class Telemetry:
     """Collect opt-in memory snapshots and generation timing for one generate() call.
 

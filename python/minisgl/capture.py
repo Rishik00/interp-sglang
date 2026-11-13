@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, List, Literal, Tuple
+from typing import TYPE_CHECKING, Callable, List, Literal, Tuple
 
 import torch
 
@@ -14,12 +14,41 @@ ActivationSignal = Literal["attention_output", "post_residual", "lm_head_input"]
 
 @dataclass(frozen=True)
 class ActivationCaptureConfig:
-    """Select prefill signals; LM head input capture is independent of layer_ids."""
+    """Select signals. Decode uses fixed graph outputs and a bounded staging window."""
 
     layer_ids: Tuple[int, ...]
     capture_attention_output: bool = True
     capture_post_residual: bool = True
     capture_lm_head_input: bool = False
+    capture_prefill: bool = True
+    capture_decode: bool = False
+    decode_window_steps: int = 16
+    decode_gpu_budget_bytes: int = 128 * 1024 * 1024
+    capture_terminal_token: bool = True
+    decode_offload_to_cpu: bool = True
+    decode_sink: Callable[[DecodeCaptureWindow], None] | None = None
+
+
+@dataclass(frozen=True)
+class DecodeToken:
+    request_id: int
+    token_id: int
+    token_position: int
+    generated_index: int
+    terminal: bool = False
+
+
+@dataclass(frozen=True)
+class DecodeCaptureWindow:
+    """[signals, token rows, width]; owned CPU copy or borrowed GPU window.
+
+    Without CPU offload, the tensor is only valid until the next staging write.
+    A GPU consumer must enqueue its work on the current inference stream.
+    """
+
+    tensor: torch.Tensor
+    keys: Tuple[Tuple[int | None, ActivationSignal], ...]
+    tokens: Tuple[DecodeToken, ...]
 
 
 @dataclass(frozen=True)
@@ -61,6 +90,135 @@ class ActivationCaptureManager:
         self.enabled = True
         self._layer_ids = frozenset(config.layer_ids)
         self._staged: List[_StagedActivation] = []
+        self.decode_buffer: torch.Tensor | None = None
+        self.decode_window: torch.Tensor | None = None
+        self.recording_decode_graph = False
+        self.decode_forward_active = False
+        self.decode_written: set[Tuple[int | None, ActivationSignal]] = set()
+        self.decode_keys: Tuple[Tuple[int | None, ActivationSignal], ...] = ()
+        self.decode_key_indices: dict[Tuple[int | None, ActivationSignal], int] = {}
+        self.decode_tokens: List[DecodeToken] = []
+        self.decode_steps = 0
+        self.decode_stats = {
+            "reserved_bytes": 0,
+            "capacity_rows": 0,
+            "peak_rows": 0,
+            "captured_rows": 0,
+            "offloaded_bytes": 0,
+            "terminal_rows": 0,
+            "windows": 0,
+            "graph_batches": 0,
+            "eager_batches": 0,
+        }
+
+    def prepare_decode(
+        self, max_batch_size: int, hidden_size: int, dtype: torch.dtype, device: torch.device
+    ) -> None:
+        """Reserve capture memory before the engine sizes its KV cache."""
+        if not self.config.capture_decode:
+            return
+        if self.config.decode_sink is None:
+            raise ValueError(
+                "Decode capture requires a sink to consume or explicitly discard windows"
+            )
+        if self.config.decode_window_steps < 1 or max_batch_size < 1:
+            raise ValueError("Decode window steps and batch size must be positive")
+        keys = [
+            (layer, signal)
+            for layer in sorted(self._layer_ids)
+            for signal in ("attention_output", "post_residual")
+            if self._signal_enabled(signal)
+        ]
+        if self.config.capture_lm_head_input:
+            keys.append((None, "lm_head_input"))
+        if not keys:
+            raise ValueError("Decode capture requires at least one signal")
+        row_bytes = len(keys) * hidden_size * dtype.itemsize
+        scratch_bytes = row_bytes * max_batch_size
+        capacity = min(
+            max_batch_size * self.config.decode_window_steps,
+            (self.config.decode_gpu_budget_bytes - scratch_bytes) // row_bytes,
+        )
+        if capacity < max_batch_size:
+            raise ValueError("Decode GPU budget cannot fit graph outputs and one full batch")
+        self.decode_keys = tuple(keys)
+        self.decode_key_indices = {key: index for index, key in enumerate(keys)}
+        self.decode_buffer = torch.empty(
+            (len(keys), max_batch_size, hidden_size), dtype=dtype, device=device
+        )
+        self.decode_window = torch.empty(
+            (len(keys), capacity, hidden_size), dtype=dtype, device=device
+        )
+        self.decode_stats.update(
+            reserved_bytes=scratch_bytes + capacity * row_bytes, capacity_rows=capacity
+        )
+
+    def verify_decode_writes(self) -> None:
+        if self.decode_written != set(self.decode_keys):
+            raise RuntimeError(
+                f"Decode hooks missing signals: {set(self.decode_keys) - self.decode_written}"
+            )
+
+    def finish_decode(self, batch: Batch, used_graph: bool, terminal: bool = False) -> None:
+        """Snapshot values and CPU provenance before request counters are advanced."""
+        if not self.enabled or not self.config.capture_decode:
+            return
+        if self.decode_buffer is None or self.decode_window is None:
+            raise RuntimeError("Decode capture buffers were not initialized")
+        if not used_graph:
+            self.verify_decode_writes()
+        count = batch.size
+        start = len(self.decode_tokens)
+        if start + count > self.decode_window.shape[1]:
+            self.flush_decode()
+            start = 0
+        # Same-stream ordering prevents the next graph replay overwriting this snapshot.
+        self.decode_window[:, start : start + count].copy_(self.decode_buffer[:, :count])
+        for req in batch.reqs:
+            position = req.cached_len
+            if req.extend_len != 1 or position >= len(req.input_ids):
+                raise RuntimeError("Decode provenance requires one known input token per request")
+            prompt_length = req.max_device_len - req.output_len
+            self.decode_tokens.append(
+                DecodeToken(
+                    req.uid,
+                    int(req.input_ids[position]),
+                    position,
+                    position - prompt_length,
+                    terminal,
+                )
+            )
+        self.decode_steps += 1
+        self.decode_stats["captured_rows"] += count
+        self.decode_stats["terminal_rows"] += count if terminal else 0
+        self.decode_stats["peak_rows"] = max(
+            self.decode_stats["peak_rows"], len(self.decode_tokens)
+        )
+        self.decode_stats["graph_batches" if used_graph else "eager_batches"] += 1
+        if (
+            self.decode_steps >= self.config.decode_window_steps
+            or len(self.decode_tokens) == self.decode_window.shape[1]
+        ):
+            self.flush_decode()
+
+    def flush_decode(self) -> None:
+        """Consume a window before recycling its bounded GPU storage."""
+        if not self.decode_tokens:
+            return
+        assert self.decode_window is not None and self.config.decode_sink is not None
+        tensor = self.decode_window[:, : len(self.decode_tokens)]
+        if self.config.decode_offload_to_cpu:
+            # Copy only in offload mode; GPU consumers borrow the existing view.
+            tensor = tensor.to("cpu", copy=True).contiguous()
+        self.config.decode_sink(
+            DecodeCaptureWindow(tensor, self.decode_keys, tuple(self.decode_tokens))
+        )
+        if self.config.decode_offload_to_cpu:
+            self.decode_stats["offloaded_bytes"] += tensor.numel() * tensor.element_size()
+        # Keep the window intact if the sink raises. Shutdown can retry the flush.
+        self.decode_tokens.clear()
+        self.decode_steps = 0
+        self.decode_stats["windows"] += 1
 
     def _signal_enabled(self, signal: ActivationSignal) -> bool:
         if signal == "attention_output":
@@ -99,9 +257,23 @@ class ActivationCaptureManager:
         tensor: torch.Tensor,
         batch: Batch,
     ) -> None:
-        # Decode may run under CUDA graphs. This first implementation intentionally
-        # captures prefill only, which also keeps graph construction untouched.
-        if not self.enabled or not batch.is_prefill:
+        if batch.is_decode:
+            # Python executes these copies during graph construction; replay executes
+            # the recorded GPU copies. It must never append Python records in the graph.
+            if self.config.capture_decode and (
+                self.recording_decode_graph or (self.enabled and self.decode_forward_active)
+            ):
+                key = (layer_id, signal)
+                if key in self.decode_key_indices:
+                    assert self.decode_buffer is not None
+                    if tensor.ndim != 2 or tensor.shape[0] > self.decode_buffer.shape[1]:
+                        raise RuntimeError(f"Invalid decode tensor shape: {tuple(tensor.shape)}")
+                    self.decode_buffer[self.decode_key_indices[key], : tensor.shape[0]].copy_(
+                        tensor.detach()
+                    )
+                    self.decode_written.add(key)
+            return
+        if not self.enabled or not self.config.capture_prefill:
             return
         if not self._signal_enabled(signal):
             return

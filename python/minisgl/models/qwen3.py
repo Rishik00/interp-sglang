@@ -14,7 +14,6 @@ from .utils import RopeAttn as Qwen3Attn
 if TYPE_CHECKING:
     from .config import ModelConfig
 
-
 class Qwen3DecoderLayer(BaseOP):
     def __init__(self, config: ModelConfig, layer_id: int):
         self.self_attn = Qwen3Attn(config, layer_id, has_qk_norm=True)

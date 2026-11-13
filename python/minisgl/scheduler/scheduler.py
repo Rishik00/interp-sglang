@@ -46,6 +46,14 @@ class Scheduler(SchedulerIOMixin):
     def __init__(self, config: SchedulerConfig):
         from minisgl.engine import Engine
 
+        if (
+            config.activation_capture is not None
+            and config.activation_capture.capture_decode
+            and not ENV.DISABLE_OVERLAP_SCHEDULING
+        ):
+            raise ValueError(
+                "Decode capture currently requires MINISGL_DISABLE_OVERLAP_SCHEDULING=1"
+            )
         self.engine = Engine(config)
 
         # use another stream to overlap metadata processing with computation
@@ -143,6 +151,14 @@ class Scheduler(SchedulerIOMixin):
         copy_done.synchronize()
         reply: List[DetokenizeMsg] = []
         new_finished_reqs: Set[Req] = set()
+        terminal_reqs: List[Req] = []
+        manager = self.engine.capture_manager
+        capture_terminal = (
+            manager is not None
+            and manager.enabled
+            and manager.config.capture_decode
+            and manager.config.capture_terminal_token
+        )
         with self.cache_manager.lazy_free_region():
             for i, req in enumerate(batch.reqs):
                 if isinstance(req, ChunkedReq):
@@ -158,10 +174,25 @@ class Scheduler(SchedulerIOMixin):
                 # NOTE: overlap scheduling may make the request freed twice, skip second free
                 if finished and req not in self.finished_reqs:
                     self.decode_manager.remove_req(req)
-                    self._free_req_resources(req)
+                    if capture_terminal:
+                        terminal_reqs.append(req)
+                    else:
+                        self._free_req_resources(req)
                     new_finished_reqs.add(req)
                 elif batch.is_prefill:  # for prefill, non-chunk req, cache the prefix
                     self.cache_manager.cache_req(req, finished=False)
+
+            if terminal_reqs:
+                # The final sampled token has not entered a forward pass yet.
+                # Keep its KV/table slots alive for one capture-only decode;
+                # this deliberately does not sample or emit an extra token.
+                terminal_batch = Batch(reqs=terminal_reqs, phase="decode")
+                forward_input = self._prepare_batch(terminal_batch)
+                terminal_batch.input_ids = self.token_pool[forward_input.input_tuple]
+                self.engine.forward_model(terminal_batch, terminal=True)
+                for req in terminal_reqs:
+                    req.cached_len = req.device_len
+                    self._free_req_resources(req)
 
         self.finished_reqs = new_finished_reqs
         self.send_result(reply)

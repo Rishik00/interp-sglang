@@ -1,10 +1,16 @@
-"""Paired capture/memory benchmark on ten basic QA prompts.
+"""Paired capture/memory benchmark and HF activation validation.
 
+A pinned, length-stratified WildChat sample replaces the synthetic/QA prompts.
 Each prompt is run once with prefill activation capture disabled and once with
 capture enabled. Generation stops at EOS, subject to --max-tokens.
 
-Usage:
-    python modal_benchmark.py --gpu T4 --max-tokens 512
+Usage (both phases by default):
+    python modal_benchmark.py --gpu T4 --model-id Qwen/Qwen3-1.7B
+    python modal_benchmark.py --gpu T4 --model-id meta-llama/Llama-3.2-1B-Instruct
+    python modal_benchmark.py --mode validate --model-id Qwen/Qwen3-1.7B
+
+Validation uses naive caching, 256-token chunks and two concurrent requests.
+Serving allocations are released before loading the reference on the same T4.
 """
 
 from __future__ import annotations
@@ -12,8 +18,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import statistics
+import subprocess
 import time
+from dataclasses import asdict
 from typing import TYPE_CHECKING, Any
 
 import modal
@@ -22,36 +29,26 @@ if TYPE_CHECKING:
     from minisgl.llm import LLM  # type: ignore
 
 from config import (
-    CAPTURE_LAYERS,
     LOCAL_REPO,
-    PROMPTS,
     REMOTE_CACHE,
     REMOTE_REPO,
     app,
     cache_volume,
     dependency_image,
 )
-from utils import mem_cleanup, memory_snapshot, tokenize_prompt
-
-
-def _median(rows: list[dict[str, Any]], key: str) -> float:
-    if not rows:
-        raise ValueError(f"Cannot summarize {key}: no benchmark rows")
-    return statistics.median(float(row[key]) for row in rows)
-
-
-def _summarize(rows: list[dict[str, Any]], capture: bool) -> dict[str, float]:
-    selected = [row for row in rows if row["capture"] is capture]
-    keys = (
-        "ttft_seconds",
-        "prefill_tokens_per_second",
-        "decode_tokens_per_second",
-        "generation_seconds",
-        "drain_seconds",
-        "end_to_end_tokens_per_second",
-        "peak_driver_used_bytes",
-    )
-    return {key: _median(selected, key) for key in keys}
+from utils import (
+    capture_layers,
+    compare_activations,
+    hugging_face_modal_secrets,
+    load_wildchat_prompts,
+    median,
+    mem_cleanup,
+    memory_snapshot,
+    reconstruct_capture,
+    summarize_medians,
+    tokenize_prompt,
+    write_run_artifact,
+)
 
 
 def run_once(
@@ -61,15 +58,16 @@ def run_once(
     capture: bool,
     ids: list[int],
     max_tokens: int,
+    layers: tuple[int, ...],
     warmup: bool = False,
 ) -> dict[str, Any]:
     import torch
-    from minisgl.core import SamplingParams #type:ignore
+    from minisgl.core import SamplingParams  # type:ignore
 
     manager.enabled = capture
     if manager.drain():
         raise RuntimeError("Capture queue was not empty before iteration")
-    
+
     mem_cleanup()
     memory_before = memory_snapshot()
 
@@ -108,6 +106,8 @@ def run_once(
     finally:
         llm.send_result = original_send_result
     generation_finished = time.perf_counter()
+    peak_allocated_bytes = torch.cuda.max_memory_allocated()
+    peak_reserved_bytes = torch.cuda.max_memory_reserved()
 
     if first_token_at is None or last_token_at is None or final_token_id is None:
         raise RuntimeError("No generated tokens were observed")
@@ -124,9 +124,17 @@ def run_once(
     drain_finished = time.perf_counter()
     memory_after_drain = memory_snapshot()
 
-    expected_captures = 2 * len(CAPTURE_LAYERS) if capture else 0
-    if len(captures) != expected_captures:
-        raise RuntimeError(f"Expected {expected_captures} captures, received {len(captures)}")
+    expected_keys = {
+        (layer, signal) for layer in layers for signal in ("attention_output", "post_residual")
+    }
+    expected_keys.add((None, "lm_head_input"))
+    if capture:
+        if {(c.layer_id, c.signal) for c in captures} != expected_keys:
+            raise RuntimeError("Missing or unexpected capture signals")
+        for layer, signal in expected_keys:
+            reconstruct_capture(captures, layer, signal, 0, ids)
+    elif captures:
+        raise RuntimeError("Received captures while disabled")
     capture_bytes = sum(item.tensor.numel() * item.tensor.element_size() for item in captures)
     del captures
 
@@ -148,11 +156,14 @@ def run_once(
         "generated_steps_including_terminal": generated_steps,
         "returned_token_count": len(result[0]["token_ids"]),
         "finish_reason": "eos" if reached_eos else "length",
+        "terminal_token_id": final_token_id,
         "reached_eos": reached_eos,
         "ttft_seconds": ttft_seconds,
         "prefill_tokens_per_second": len(ids) / ttft_seconds,
         "decode_tokens_per_second": (
-            (generated_steps - 1) / decode_seconds if decode_seconds > 0 else float("inf")
+            (generated_steps - 1) / decode_seconds
+            if generated_steps > 1 and decode_seconds > 0
+            else None
         ),
         "generation_seconds": generation_seconds,
         "drain_seconds": drain_finished - drain_started,
@@ -160,30 +171,31 @@ def run_once(
         / (generation_seconds + drain_finished - drain_started),
         "capture_bytes": capture_bytes,
         "peak_driver_used_bytes": peak_driver_used,
-
+        "peak_allocated_bytes": peak_allocated_bytes,
+        "peak_reserved_bytes": peak_reserved_bytes,
         # Retain lifecycle snapshots to distinguish staged capture memory from
         # memory remaining after drain and explicit release.
         "memory_before": memory_before,
-
         "memory_before_drain": memory_before_drain,
         "memory_after_drain": memory_after_drain,
         "memory_after_release": memory_after_release,
         "result_text": result[0]["text"],
         "result_token_ids": result[0]["token_ids"],
     }
+    decode_rate = row["decode_tokens_per_second"]
+    decode_label = f"{decode_rate:.2f}" if decode_rate is not None else "n/a"
     print(
         f"[benchmark] prompt={index} capture={capture} input={len(ids)} "
         f"generated={generated_steps} finish={row['finish_reason']} "
-        f"ttft={ttft_seconds:.6f}s decode_tps={row['decode_tokens_per_second']:.2f} "
+        f"ttft={ttft_seconds:.6f}s decode_tps={decode_label} "
         f"artifact={capture_bytes / 2**20:.2f}MiB",
         flush=True,
     )
 
     return row
 
-# Defaults cover direct Modal invocation; CLI options supply per-run configuration.
-@app.function(image=dependency_image, gpu="T4", volumes={str(REMOTE_CACHE): cache_volume})
-def run_benchmark(
+
+def benchmark_model(
     max_tokens: int,
     model_id: str,
     cache_type: str,
@@ -192,7 +204,12 @@ def run_benchmark(
     max_seq_len: int,
     memory_ratio: float,
     use_pynccl: bool,
+    layers: tuple[int, ...],
+    workload: dict[str, Any],
 ) -> dict[str, Any]:
+    # Prefix reuse skips activations needed for complete prompt reconstruction.
+    if cache_type != "naive":
+        raise ValueError("Activation benchmarking currently supports only the naive cache")
 
     import torch
     from minisgl.capture import ActivationCaptureConfig
@@ -213,7 +230,7 @@ def run_benchmark(
         max_seq_len_override=max_seq_len,
         memory_ratio=memory_ratio,
         use_pynccl=use_pynccl,
-        activation_capture=ActivationCaptureConfig(layer_ids=CAPTURE_LAYERS),
+        activation_capture=ActivationCaptureConfig(layer_ids=layers, capture_lm_head_input=True),
     )
     manager = llm.engine.capture_manager
     tokenizer = llm.tokenizer
@@ -221,31 +238,38 @@ def run_benchmark(
     assert manager is not None
     assert tokenizer is not None
 
-    prompt_ids = [tokenize_prompt(tokenizer, prompt) for prompt in PROMPTS]
+    prompt_ids = [prompt["token_ids"] for prompt in workload["prompts"]]
     if max(len(ids) for ids in prompt_ids) + max_tokens >= max_seq_len:
         raise RuntimeError("Prompt plus completion safety cap exceeds max sequence length")
     try:
         print("[benchmark] warming CUDA graph and both capture modes", flush=True)
         warmup_ids = tokenize_prompt(tokenizer, "Explain in one sentence what a tensor is.")
-        run_once(manager, llm, -1, False, warmup_ids, max_tokens, warmup=True)
-        run_once(manager, llm, -1, True, warmup_ids, max_tokens, warmup=True)
+        run_once(manager, llm, -1, False, warmup_ids, max_tokens, layers, warmup=True)
+        run_once(manager, llm, -1, True, warmup_ids, max_tokens, layers, warmup=True)
 
         rows: list[dict[str, Any]] = []
         for index, ids in enumerate(prompt_ids):
             # Alternate mode order across prompts to reduce systematic warm/order bias.
             order = (False, True) if index % 2 == 0 else (True, False)
-            pair = [run_once(manager, llm, index, capture, ids, max_tokens) for capture in order]
+            pair = [
+                run_once(manager, llm, index, capture, ids, max_tokens, layers) for capture in order
+            ]
             off = next(row for row in pair if not row["capture"])
             on = next(row for row in pair if row["capture"])
-            if off["result_token_ids"] != on["result_token_ids"]:
+            if (
+                off["result_token_ids"] != on["result_token_ids"]
+                or off["terminal_token_id"] != on["terminal_token_id"]
+                or off["generated_steps_including_terminal"]
+                != on["generated_steps_including_terminal"]
+            ):
                 raise RuntimeError(f"Capture changed greedy output for prompt {index}")
             rows.extend(pair)
 
-        off_summary = _summarize(rows, False)
-        on_summary = _summarize(rows, True)
+        off_summary = summarize_medians(rows, False)
+        on_summary = summarize_medians(rows, True)
         pairs = []
 
-        for index in range(len(PROMPTS)):
+        for index in range(len(prompt_ids)):
             off = next(row for row in rows if row["prompt_index"] == index and not row["capture"])
             on = next(row for row in rows if row["prompt_index"] == index and row["capture"])
             pairs.append(
@@ -256,8 +280,11 @@ def run_benchmark(
                     "finish_reason": on["finish_reason"],
                     "ttft_overhead_percent": (on["ttft_seconds"] / off["ttft_seconds"] - 1) * 100,
                     "decode_tps_change_percent": (
-                        on["decode_tokens_per_second"] / off["decode_tokens_per_second"] - 1
-                    ) * 100,
+                        (on["decode_tokens_per_second"] / off["decode_tokens_per_second"] - 1) * 100
+                        if off["decode_tokens_per_second"] is not None
+                        and on["decode_tokens_per_second"] is not None
+                        else None
+                    ),
                     "peak_driver_used_delta_bytes": (
                         on["peak_driver_used_bytes"] - off["peak_driver_used_bytes"]
                     ),
@@ -268,20 +295,28 @@ def run_benchmark(
         result = {
             "model": model_id,
             "gpu": torch.cuda.get_device_name(0),
-            "capture_layers": CAPTURE_LAYERS,
-            "capture_signals": ("attention_output", "post_residual"),
+            "capture_layers": layers,
+            "capture_signals": ("attention_output", "post_residual", "lm_head_input"),
             "capture_scope": "prefill_only",
+            "dtype": "float16",
+            "config": {
+                "cache_type": cache_type,
+                "max_extend_tokens": max_extend_tokens,
+                "max_running_req": max_running_req,
+                "max_seq_len": max_seq_len,
+                "memory_ratio": memory_ratio,
+                "cuda_graph_batches": sorted(llm.engine.graph_runner.graph_map),
+                "overlap": False,
+            },
             "max_tokens_safety_cap": max_tokens,
-            "prompts": [
-                {"index": i, "user_prompt": prompt, "input_tokens": len(prompt_ids[i])}
-                for i, prompt in enumerate(PROMPTS)
-            ],
+            "workload": workload,
+            "prompts": workload["prompts"],
             "rows": rows,
             "pairs": pairs,
             "median_capture_off": off_summary,
             "median_capture_on": on_summary,
             "median_paired": {
-                key: statistics.median(float(pair[key]) for pair in pairs)
+                key: median(pairs, key)
                 for key in (
                     "ttft_overhead_percent",
                     "decode_tps_change_percent",
@@ -298,52 +333,375 @@ def run_benchmark(
         # engine teardown on success and on any failed measurement.
         llm.shutdown()
 
+
+def validate_model(
+    model_id: str, layers: tuple[int, ...], workload: dict[str, Any], memory_ratio: float
+) -> dict:
+    import torch
+    import transformers
+    from minisgl.capture import ActivationCaptureConfig
+    from minisgl.core import SamplingParams
+    from minisgl.llm import LLM
+    from transformers import AutoModelForCausalLM
+
+    # Aggregate and per-token checks tolerate FP16 kernel/reduction differences.
+    thresholds = {"relative_l2_max": 0.05, "cosine_min": 0.999, "minimum_token_cosine_min": 0.98}
+    samples = workload["prompts"]
+    cases = [(f"dataset_row_{p['dataset_row']}", [p["token_ids"]]) for p in samples]
+    # Reuse two real prompts to exercise request/span separation in a batch.
+    shortest = sorted(samples, key=lambda p: p["input_tokens"])[:2]
+    cases.append(("two_requests", [p["token_ids"] for p in shortest]))
+    llm = LLM(
+        model_path=model_id,
+        dtype=torch.float16,
+        cache_type="naive",
+        cuda_graph_max_bs=1,
+        max_extend_tokens=256,
+        max_running_req=2,
+        max_seq_len_override=4096,
+        memory_ratio=memory_ratio,
+        use_pynccl=False,
+        activation_capture=ActivationCaptureConfig(layer_ids=layers, capture_lm_head_input=True),
+    )
+    saved = []
+    sampling = SamplingParams(top_k=1, temperature=0, max_tokens=3, ignore_eos=True)
+    try:
+        for name, prompts in cases:
+            manager = llm.engine.capture_manager
+            manager.enabled = False
+            off = llm.generate(prompts, sampling)
+            assert llm.take_activation_captures() == []
+            manager.enabled = True
+            on = llm.generate(prompts, sampling)
+            captures = llm.take_activation_captures()
+            assert llm.take_activation_captures() == []
+            assert [r["token_ids"] for r in off] == [r["token_ids"] for r in on]
+            saved.append((name, prompts, on, captures))
+            print(f"[validate] captured {name}: {len(captures)} records", flush=True)
+
+        saved_cpu_capture_bytes = sum(
+            capture.tensor.numel() * capture.tensor.element_size()
+            for _, _, _, captures in saved
+            for capture in captures
+        )
+        llm.shutdown()
+        llm = None
+        manager = None
+        from minisgl.layers.rotary import get_rope
+
+        get_rope.cache_clear()
+        mem_cleanup()
+        reference_free_gpu_bytes = torch.cuda.mem_get_info()[0]
+        # Hook the actual block outputs: HF's final hidden_states entry is
+        # normalized, whereas our final post_residual is BEFORE the final norm.
+        reference = (
+            AutoModelForCausalLM.from_pretrained(
+                model_id,
+                torch_dtype=torch.float16,
+                attn_implementation="eager",
+            )
+            .eval()
+            .to("cuda")
+        )
+        hooked = {}
+
+        def hook(key):
+            def record(module, args, output):
+                value = output[0] if isinstance(output, tuple) else output
+                hooked[key] = value.detach().squeeze(0).cpu().clone()
+
+            return record
+
+        handles = []
+        # The final norm emits the full head input before either runtime slices
+        # positions for projection (HF's logits_to_keep also slices positions).
+        handles.append(reference.model.norm.register_forward_hook(hook((None, "lm_head_input"))))
+        for layer in layers:
+            block = reference.model.layers[layer]
+            handles.append(block.register_forward_hook(hook((layer, "post_residual"))))
+            handles.append(
+                block.self_attn.o_proj.register_forward_hook(hook((layer, "attention_output")))
+            )
+
+        rows = []
+        metadata = []
+        for name, prompts, outputs, captures in saved:
+            expected_keys = {
+                (layer, signal)
+                for layer in layers
+                for signal in ("attention_output", "post_residual")
+            }
+            expected_keys.add((None, "lm_head_input"))
+            assert {(c.layer_id, c.signal) for c in captures} == expected_keys
+            metadata.append(
+                {
+                    "case": name,
+                    "input_tokens": [len(p) for p in prompts],
+                    "capture_records": len(captures),
+                    "spans": [
+                        asdict(s)
+                        for c in captures
+                        if c.layer_id == 0 and c.signal == "post_residual"
+                        for s in c.spans
+                    ],
+                }
+            )
+            for request_id, ids in enumerate(prompts):
+                hooked.clear()
+                with torch.inference_mode():
+                    result = reference(
+                        input_ids=torch.tensor([ids], device="cuda"),
+                        use_cache=False,
+                        logits_to_keep=1,
+                    )
+                assert set(hooked) == expected_keys
+                first_token_matches = (
+                    int(result.logits[0, -1].argmax()) == outputs[request_id]["token_ids"][0]
+                )
+                del result
+                for layer, signal in sorted(
+                    expected_keys, key=lambda key: (-1 if key[0] is None else key[0], key[1])
+                ):
+                    actual = reconstruct_capture(captures, layer, signal, request_id, ids)
+                    expected = hooked[(layer, signal)].float()
+                    assert (
+                        actual.shape == expected.shape == (len(ids), reference.config.hidden_size)
+                    )
+                    metrics = compare_activations(actual, expected, thresholds)
+                    metrics["activation_passed"] = metrics["passed"]
+                    metrics["passed"] &= first_token_matches
+                    rows.append(
+                        {
+                            "case": name,
+                            "request_id": request_id,
+                            "layer": layer,
+                            "signal": signal,
+                            "shape": list(actual.shape),
+                            **metrics,
+                            "hf_first_token_matches": first_token_matches,
+                        }
+                    )
+                print(f"[validate] compared {name} request={request_id}", flush=True)
+        for handle in handles:
+            handle.remove()
+        return {
+            "model": model_id,
+            "gpu": torch.cuda.get_device_name(),
+            "torch": torch.__version__,
+            "transformers": transformers.__version__,
+            "dtype": "float16",
+            "hf_attention": "eager",
+            "metric_dtype": "float64",
+            "layers": layers,
+            "thresholds": thresholds,
+            "memory_ratio": memory_ratio,
+            "saved_cpu_capture_bytes": saved_cpu_capture_bytes,
+            "reference_free_gpu_bytes": reference_free_gpu_bytes,
+            "workload": workload,
+            "cases": metadata,
+            "rows": rows,
+            "capture_on_off_outputs_identical": True,
+            "all_passed": all(r["passed"] for r in rows),
+        }
+    finally:
+        if llm is not None:
+            llm.shutdown()
+
+
+@app.function(
+    image=dependency_image,
+    memory=8192,
+    timeout=1200,
+    volumes={str(REMOTE_CACHE): cache_volume},
+)
+def prepare_workload(model_id: str, dataset_options: dict[str, Any]) -> dict[str, Any]:
+    from transformers import AutoTokenizer
+
+    workload = load_wildchat_prompts(AutoTokenizer.from_pretrained(model_id), **dataset_options)
+    print(
+        f"[dataset] {workload['dataset']} revision={workload['revision']} "
+        f"rows={[p['dataset_row'] for p in workload['prompts']]} "
+        f"tokens={[p['input_tokens'] for p in workload['prompts']]}",
+        flush=True,
+    )
+    return workload
+
+
+# Each phase uses a separate container so allocator and CUDA graph state cannot
+# contaminate benchmark timings or take VRAM away from the HF reference.
+@app.function(
+    image=dependency_image,
+    gpu="T4",
+    memory=8192,
+    timeout=1200,
+    volumes={str(REMOTE_CACHE): cache_volume},
+    single_use_containers=True,
+)
+def run_benchmark(
+    mode: str,
+    model_id: str,
+    workload: dict[str, Any],
+    all_layers: bool = False,
+    source_commit: str | None = None,
+    **kwargs,
+) -> dict[str, Any]:
+    from transformers import AutoConfig
+
+    depth = AutoConfig.from_pretrained(model_id).num_hidden_layers
+    layers = tuple(range(depth)) if all_layers else capture_layers(depth)
+    if mode == "validate":
+        result = validate_model(model_id, layers, workload, kwargs.get("memory_ratio", 0.45))
+    elif mode == "benchmark":
+        result = benchmark_model(model_id=model_id, layers=layers, workload=workload, **kwargs)
+    else:
+        raise ValueError(f"Unknown mode: {mode}")
+    result["source_commit"] = source_commit
+    result["layer_selection"] = "all" if all_layers else "sampled"
+    return result
+
+
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Capture on/off benchmark on Modal")
+    parser = argparse.ArgumentParser(
+        description="Capture on/off benchmark and HF activation validation on Modal"
+    )
+    parser.add_argument("--num-prompts", type=int, default=50, help="WildChat samples; at least 4")
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--all-layers", action="store_true", help="Capture every decoder layer")
+    parser.add_argument("--dataset-revision", default="c827c6df8fcf008219ffaffa4d1dd77491099367")
+    parser.add_argument("--dataset-scan-rows", type=int, default=4096)
+    parser.add_argument("--max-input-tokens", type=int, default=3072)
+    parser.add_argument(
+        "--mode", choices=("both", "benchmark", "validate", "sample"), default="both"
+    )
+    parser.add_argument(
+        "--hf-secret", help="Existing Modal secret containing HF_TOKEN for gated models"
+    )
     parser.add_argument("--gpu", default="T4", help="Modal GPU type, e.g. T4, L4, A10G")
-    parser.add_argument('--model-id', type=str, default="Qwen/Qwen3-0.6B")
+    parser.add_argument("--model-id", type=str, default="Qwen/Qwen3-0.6B")
     parser.add_argument("--cpu", type=float, default=2.0)
-    parser.add_argument("--memory", type=int, default=8192, help="Container memory in MiB")
-    parser.add_argument("--timeout", type=int, default=20 * 60, help="Seconds")
-    parser.add_argument("--max-tokens", type=int, default=512, help="Generation safety cap")
+    parser.add_argument("--memory", type=int, default=16384, help="Benchmark host memory in MiB")
+    parser.add_argument(
+        "--validation-memory", type=int, default=65536, help="Validation host memory in MiB"
+    )
+    parser.add_argument("--timeout", type=int, default=60 * 60, help="Seconds per phase")
+    parser.add_argument("--max-tokens", type=int, default=250, help="Generation safety cap")
 
-    parser.add_argument("--cache-type", type=str, default="naive", help="KV cache implementation")
-    parser.add_argument("--max-extend-tokens", type=int, default=3072, help="Maximum prefill extension size")
-    parser.add_argument("--max-running-req", type=int, default=1, help="Maximum concurrent requests")
-    parser.add_argument("--max-seq-len", type=int, default=4096, help="Maximum prompt plus generation length")
-    parser.add_argument("--memory-ratio", type=float, default=0.75, help="Fraction of GPU memory available to the engine")
-    parser.add_argument("--use-nccl", action=argparse.BooleanOptionalAction, default=False, help="Enable PyNCCL")
+    parser.add_argument(
+        "--cache-type",
+        choices=("naive",),
+        default="naive",
+        help="Cache implementation (only naive is supported for activation benchmarking)",
+    )
+    parser.add_argument(
+        "--max-extend-tokens", type=int, default=3072, help="Maximum prefill extension size"
+    )
+    parser.add_argument(
+        "--max-running-req", type=int, default=1, help="Maximum concurrent requests"
+    )
+    parser.add_argument(
+        "--max-seq-len", type=int, default=4096, help="Maximum prompt plus generation length"
+    )
+    parser.add_argument(
+        "--memory-ratio",
+        type=float,
+        default=0.75,
+        help="Fraction of GPU memory available to the engine",
+    )
+    parser.add_argument(
+        "--use-nccl", action=argparse.BooleanOptionalAction, default=False, help="Enable PyNCCL"
+    )
 
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.num_prompts < 4:
+        parser.error("--num-prompts must be at least 4")
+    if args.dataset_scan_rows < args.num_prompts:
+        parser.error("--dataset-scan-rows must be at least --num-prompts")
+    if not 2049 <= args.max_input_tokens <= 4092:
+        parser.error("--max-input-tokens must be between 2049 and 4092")
+    if (
+        args.mode in ("both", "benchmark")
+        and args.max_input_tokens + args.max_tokens >= args.max_seq_len
+    ):
+        parser.error("--max-input-tokens plus --max-tokens must be below --max-seq-len")
+    return args
+
 
 def main() -> None:
     args = parse_args()
-    benchmark = run_benchmark.with_options(
-        gpu=args.gpu, cpu=args.cpu, memory=args.memory, timeout=args.timeout
-    )
-
-    # Detached so the run survives a dropped client; spawn().get() waits for the result.
+    source_commit = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=LOCAL_REPO, text=True
+    ).strip()
+    options = {"gpu": args.gpu, "cpu": args.cpu, "memory": args.memory, "timeout": args.timeout}
+    options["secrets"] = hugging_face_modal_secrets(args.hf_secret)
+    runner = run_benchmark.with_options(**options)
+    modes = ("benchmark", "validate") if args.mode == "both" else (args.mode,)
+    failed = False
     with modal.enable_output(), app.run(detach=True):
-        result = benchmark.spawn(
-            max_tokens=args.max_tokens,
-            model_id=args.model_id,
-            cache_type=args.cache_type, 
-            max_extend_tokens=args.max_extend_tokens,
-            max_running_req=args.max_running_req,
-            max_seq_len=args.max_seq_len,
-            memory_ratio=args.memory_ratio,
-            use_pynccl=args.use_nccl,
+        sampler = prepare_workload.with_options(**{k: v for k, v in options.items() if k != "gpu"})
+        workload = sampler.spawn(
+            args.model_id,
+            {
+                "count": args.num_prompts,
+                "seed": args.seed,
+                "revision": args.dataset_revision,
+                "max_tokens": args.max_input_tokens,
+                "scan_rows": args.dataset_scan_rows,
+            },
         ).get()
+        manifest_path = write_run_artifact(
+            {"model": args.model_id, "workload": workload},
+            LOCAL_REPO / "artifacts" / "modal-traces",
+            "wildchat-prompts",
+        )
+        print(f"Prompt manifest: {manifest_path}")
+        if args.mode == "sample":
+            return
+        for mode in modes:
+            kwargs = (
+                {"memory_ratio": args.memory_ratio}
+                if mode == "validate"
+                else {
+                    "max_tokens": args.max_tokens,
+                    "cache_type": args.cache_type,
+                    "max_extend_tokens": args.max_extend_tokens,
+                    "max_running_req": args.max_running_req,
+                    "max_seq_len": args.max_seq_len,
+                    "memory_ratio": args.memory_ratio,
+                    "use_pynccl": args.use_nccl,
+                }
+            )
+            kwargs["workload"] = workload
+            phase_runner = (
+                run_benchmark.with_options(**{**options, "memory": args.validation_memory})
+                if mode == "validate"
+                else runner
+            )
+            result = phase_runner.spawn(
+                mode=mode,
+                model_id=args.model_id,
+                all_layers=args.all_layers,
+                source_commit=source_commit,
+                **kwargs,
+            ).get()
+            path = write_run_artifact(result, LOCAL_REPO / "artifacts" / "modal-traces", mode)
+            print(f"Results: {path}")
+            if mode == "validate":
+                failed |= not result["all_passed"]
+                summary = {
+                    "all_passed": result["all_passed"],
+                    "comparisons": len(result["rows"]),
+                    "failures": [r for r in result["rows"] if not r["passed"]],
+                }
+            else:
+                summary = {
+                    key: value
+                    for key, value in result.items()
+                    if key not in ("rows", "prompts", "pairs", "workload")
+                }
+            print(json.dumps(summary, indent=2))
+    if failed:
+        raise SystemExit(1)
 
-    output_dir = LOCAL_REPO / "artifacts" / "modal-traces"
-    output_dir.mkdir(parents=True, exist_ok=True)
-    timestamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
-    output_path = output_dir / f"benchmark-qa-{timestamp}.json"
-    output_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
-
-    summary = {key: value for key, value in result.items() if key not in ("rows", "prompts")}
-    print(json.dumps(summary, indent=2))
-    print(f"\nRaw benchmark: {output_path}")
 
 if __name__ == "__main__":
     main()

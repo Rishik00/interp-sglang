@@ -126,6 +126,7 @@ class GraphRunner:
             disable=not get_tp_info().is_primary(),  # disable for non-primary ranks
         )
         pool = None
+        manager = get_global_ctx().capture_manager
         for bs in pbar:
             free_memory = get_free_memory(self.device)
             pbar.desc = f"Capturing graphs: bs = {bs:<3} | avail_mem = {mem_GB(free_memory)}"
@@ -135,10 +136,19 @@ class GraphRunner:
             batch.padded_reqs = batch.reqs
             self.attn_backend.prepare_for_capture(batch)
             self.buffer.set_batch(batch)
-            with get_global_ctx().forward_batch(batch):
-                self.buffer.logits[:bs] = model.forward()
-                with torch.cuda.graph(graph, pool=pool, stream=self.stream):
+            if manager is not None:
+                manager.recording_decode_graph = True
+                manager.decode_written.clear()
+            try:
+                with get_global_ctx().forward_batch(batch):
                     self.buffer.logits[:bs] = model.forward()
+                    with torch.cuda.graph(graph, pool=pool, stream=self.stream):
+                        self.buffer.logits[:bs] = model.forward()
+                if manager is not None and manager.config.capture_decode:
+                    manager.verify_decode_writes()
+            finally:
+                if manager is not None:
+                    manager.recording_decode_graph = False
             if pool is None:
                 pool = graph.pool()  # reuse cuda graph handle to reduce memory
             self.graph_map[bs] = graph
