@@ -224,6 +224,8 @@ class Engine:
             telemetry_end = torch.cuda.Event(enable_timing=True)
             telemetry_start.record(self.stream)
 
+        # Graph replay selection lives in forward_model so normal generation and
+        # terminal-token capture share the same forward path before sampling.
         logits = self.forward_model(batch)
 
         if telemetry_start is not None and telemetry_end is not None:
@@ -245,6 +247,10 @@ class Engine:
 
     def forward_model(self, batch: Batch, terminal: bool = False) -> torch.Tensor:
         """Forward without sampling; also used for the final sampled token's capture."""
+        # This graph/eager dispatch was extracted from forward_batch; CUDA graph
+        # recording and replay still live in GraphRunner in graph.py. Keeping
+        # sampling outside this method lets terminal capture reuse graph replay
+        # without generating an additional token.
         manager = self.capture_manager
         used_graph = self.graph_runner.can_use_cuda_graph(batch)
         if manager is not None and batch.is_decode:
