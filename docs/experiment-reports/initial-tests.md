@@ -303,12 +303,6 @@ modal run modal_benchmark.py
 
 The benchmark harness is [`modal_benchmark.py`](modal_benchmark.py). The smoke and call-tracing harness is [`modal_smoke.py`](modal_smoke.py).
 
-Primary artifacts:
-
-- [`artifacts/modal-traces/benchmark-10-prompts-20261017T091744Z.prompts.txt`](artifacts/modal-traces/benchmark-10-prompts-20261017T091744Z.prompts.txt): exact prompts.
-- [`artifacts/modal-traces/benchmark-10-prompts-20261017T091744Z.json`](artifacts/modal-traces/benchmark-10-prompts-20261017T091744Z.json): prompts, outputs, token IDs, finish reasons, timings, memory snapshots, and summaries.
-- [`artifacts/modal-traces/benchmark-10-prompts-20261017T091159Z.json`](artifacts/modal-traces/benchmark-10-prompts-20261017T091159Z.json): completed short-prompt intermediate run, superseded for long-prefill conclusions.
-
 Validation performed on the final harness:
 
 - Python compilation with `python -m py_compile modal_benchmark.py`.

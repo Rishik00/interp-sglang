@@ -51,10 +51,8 @@ Metric reductions now use FP64 on CPU: the first FP32 run produced some invalid
 whole-tensor cosine values above 1. The final FP64 run still failed the same six
 comparisons, so the validation failures are not removed by that correction.
 
-Artifacts:
+Modal runs:
 
-- Benchmark: `artifacts/modal-traces/benchmark-Qwen--Qwen3-1.7B-20261030T195625Z.json`.
-- Final validation: `artifacts/modal-traces/validate-Qwen--Qwen3-1.7B-20261030T195704Z.json`.
 - Combined run: https://modal.com/apps/a-nerdy-penguin/main/ap-Vlt3fqP5jTI8Fj14hgrQ1P
 - Final FP64 validation: https://modal.com/apps/a-nerdy-penguin/main/ap-cNrbxX3WvdYD1y56FjqSWx
 

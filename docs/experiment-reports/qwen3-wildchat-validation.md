@@ -34,10 +34,6 @@ container. The independent CPU sample matched every source row and token length.
 - Rows in execution order: 1122, 1442, 1946, 327, 1359, 2546, 3665, 2125.
 - Input lengths in that order: 1110, 1835, 33, 2956, 2746, 775, 26, 291.
 
-Full prompt text, source identifiers, hashes, and token IDs are saved in
-`artifacts/modal-traces/wildchat-prompts-Qwen--Qwen3-1.7B-20261031T110201Z.json`.
-Benchmark and validation artifacts also contain the full workload manifest.
-
 ## Configuration
 
 One T4, Qwen3-1.7B, FP16, naive prefix cache, overlap disabled, sequence limit
@@ -76,12 +72,9 @@ changing the prefill guard alone is insufficient.
 rejection when natural long prompts are missing, and missing-prefix detection.
 Ruff, Python compilation, and changed-file whitespace checks passed.
 
-## Run artifacts
+## Runs
 
 Modal run: https://modal.com/apps/a-nerdy-penguin/main/ap-lcxdgsjwZeHGcsiV1IiAnj
-
-Log: `artifacts/qwen3-1.7b-wildchat.log`.
-
 
 ## Results
 
@@ -102,7 +95,3 @@ L2 across the run was 1.479%. The command returned exit status 1 to preserve
 this failure. This is still a numerical parity failure and needs investigation;
 it does not establish full Qwen3 support.
 
-Artifacts:
-
-- Benchmark: `artifacts/modal-traces/benchmark-Qwen--Qwen3-1.7B-20261031T110618Z.json`.
-- Validation: `artifacts/modal-traces/validate-Qwen--Qwen3-1.7B-20261031T110701Z.json`.

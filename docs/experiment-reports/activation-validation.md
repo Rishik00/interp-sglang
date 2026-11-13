@@ -1,6 +1,5 @@
 # Activation reference validation
 
-Run artifact: `artifacts/modal-traces/activation-validation-20261030T190224Z.json`.
 Modal run: https://modal.com/apps/a-nerdy-penguin/main/ap-8i3lqgEGfc6j5SSxuKakVO
 
 All 60 activation comparisons passed on Qwen/Qwen3-0.6B, Tesla T4,
@@ -61,5 +60,4 @@ comparisons. All passed, as did capture on/off output equality and token/span
 alignment. The long case returned 104 records (13 signals across eight chunks);
 the two-request case returned 13 records with both requests' spans intact.
 
-Artifact: `artifacts/modal-traces/activation-validation-20261030T192037Z.json`.
 Modal run: https://modal.com/apps/a-nerdy-penguin/main/ap-Qby5khgpUIX5Qp9KjTkl9J
