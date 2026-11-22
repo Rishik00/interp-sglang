@@ -104,12 +104,12 @@ class _MiniSGLangCallTracer:
     """Print Python call/return events from the important Mini-SGLang modules."""
 
     MODULE_PREFIXES = (
-        "minisgl.scheduler",
-        "minisgl.engine",
-        "minisgl.models",
-        "minisgl.layers",
-        "minisgl.attention",
-        "minisgl.kvcache",
+        "sglang_interp.scheduler",
+        "sglang_interp.engine",
+        "sglang_interp.models",
+        "sglang_interp.layers",
+        "sglang_interp.attention",
+        "sglang_interp.kvcache",
     )
 
     def __init__(self, output: TextIO, max_events: int = 25_000):
@@ -204,9 +204,9 @@ def run_smoke(
             print(f"[run] max_tokens={max_tokens}")
 
             import torch
-            from minisgl.capture import ActivationCaptureConfig
-            from minisgl.core import SamplingParams
-            from minisgl.llm import LLM
+            from sglang_interp.capture import ActivationCaptureConfig
+            from sglang_interp.core import SamplingParams
+            from sglang_interp.llm import LLM
 
             _software_report(torch)
             tracer = _MiniSGLangCallTracer(tee) if trace else None

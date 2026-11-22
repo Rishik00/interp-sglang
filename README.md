@@ -1,4 +1,4 @@
-# Interp Mini-SGLang
+# SGLang Interp
 
 Mini-SGLang fork with activation capture for interpretability work.
 
@@ -6,6 +6,31 @@ While the model generates text, it records the activations of every layer (atten
 residual stream after each block, and the input to the LM head) and copies them from the GPU to the
 CPU. It also checks that capturing doesn't change the generated text, compares the captured
 activations against a Hugging Face reference, and measures how much capturing slows generation down.
+
+## Install
+
+Needs Linux and an NVIDIA GPU (the kernels it depends on are CUDA-only).
+
+```bash
+pip install git+https://github.com/Rishik00/interp-sglang.git
+# Or, from a checkout containing the rename:
+pip install -e .
+```
+
+The import name is `sglang_interp`. Launch the server with:
+
+```bash
+sglang-interp --model Qwen/Qwen3-1.7B
+```
+
+The module entry point is `python -m sglang_interp`. Python imports use:
+
+```python
+from sglang_interp.capture import ActivationCaptureConfig
+from sglang_interp.llm import LLM
+```
+
+The package was renamed from `minisgl`; update existing imports and launch commands.
 
 ## Minimal example
 

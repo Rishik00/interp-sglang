@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import pytest
 import torch
-from minisgl.capture import ActivationCaptureConfig, ActivationCaptureManager
-from minisgl.core import Batch, Req, SamplingParams
+from sglang_interp.capture import ActivationCaptureConfig, ActivationCaptureManager
+from sglang_interp.core import Batch, Req, SamplingParams
 
 
 def _req(uid: int, token_ids: list[int], cached_len: int) -> Req:

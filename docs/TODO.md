@@ -6,7 +6,10 @@
 - [x] Compare captured `post_residual` with HF `transformers` `output_hidden_states=True`
       for Qwen3-0.6B and a Llama model (layer N here = `hidden_states[N + 1]` there). Set fp32/fp16 tolerances.
 - [x] Compare `attention_output` with a forward hook on HF's `o_proj`.
-- [ ] Greedy outputs are identical with capture on and off (re-run on this base).
+- [x] Greedy outputs are identical with capture on and off (re-run on this base).
+      Verified in both prefill and decode runs: 50 prompts per model for Qwen3-1.7B,
+      Qwen3-4B, Llama-3.2-1B and Llama-3.2-3B. See the
+      [prefill and decode report](experiment-reports/prefill-decode-summary.md).
 
 ### Implementation corrections
 - [ ] Have a base component class that has the capture manager wired in. 
@@ -72,20 +75,3 @@ entry in `models/register.py`, and a parity test against HF (§1).
 - [ ] HF ships it as `Qwen3_5ForConditionalGeneration` (multimodal). Load the text backbone only.
 - [ ] Define the capture signal for DeltaNet layers (there is no `o_proj` attention output in the same sense).
 - [ ] Start with the smallest checkpoint (~0.8B).
-
-## 4. TransformerLens integration
-
-Goal: harvest activations here at serving speed, then analyze and intervene with TransformerLens tooling.
-
-- [ ] **Name mapping**: map our signals to TL hook names
-      (`post_residual` at layer N → `blocks.N.hook_resid_post`, `attention_output` → `blocks.N.hook_attn_out`),
-      and document the differences (TL folds LayerNorm and centers weights by default).
-- [ ] **Export format**: write drained captures to an `ActivationCache`-compatible structure
-      (or to disk shards) keyed by TL hook names, keeping request and token provenance.
-- [ ] **Parity check**: same prompt through `HookedTransformer.run_with_cache` and through our engine;
-      compare activations per hook (load TL with `fold_ln=False`, `center_writing_weights=False`).
-- [ ] **Inference on captured activations**: feed saved residuals back into TL
-      (e.g. `run_with_hooks` from layer N onward) for patching and probing without recomputing earlier layers.
-- [ ] Decide whether interventions (patching/steering) should also run inside our engine
-      or stay TL-only.
-- [ ] Check TL support for each target model (Qwen3 and Pythia are supported; Qwen 3.5 and Bonsai probably aren't).

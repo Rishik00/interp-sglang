@@ -1,11 +1,12 @@
 from __future__ import annotations
+
 from typing import Tuple
+
 import torch
 import torch.nn.functional as F
-
-from minisgl.benchmark.perf import compare_memory_kernel_perf
-from minisgl.kernel import indexing
-from minisgl.utils import call_if_main, init_logger
+from sglang_interp.benchmark.perf import compare_memory_kernel_perf
+from sglang_interp.kernel import indexing
+from sglang_interp.utils import call_if_main, init_logger
 
 logger = init_logger(__name__)
 

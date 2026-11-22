@@ -6,8 +6,8 @@ The offline Python interface can capture selected transformer signals and the
 normalized input to the LM head:
 
 ```python
-from minisgl.capture import ActivationCaptureConfig
-from minisgl.llm import LLM
+from sglang_interp.capture import ActivationCaptureConfig
+from sglang_interp.llm import LLM
 
 llm = LLM(
     model_path="Qwen/Qwen3-0.6B",
@@ -37,7 +37,7 @@ is explicitly enabled.
 
 ## Online Serving
 
-Mini-SGLang supports online serving with an OpenAI-compatible API server. It provides the standard `/v1/chat/completions` endpoint, allowing seamless integration with existing tools and clients. For detailed command-line arguments and configuration options, run `python -m minisgl --help`.
+Mini-SGLang supports online serving with an OpenAI-compatible API server. It provides the standard `/v1/chat/completions` endpoint, allowing seamless integration with existing tools and clients. For detailed command-line arguments and configuration options, run `python -m sglang_interp --help`.
 
 ## Interactive Shell Mode
 
@@ -46,7 +46,7 @@ For demonstration and testing purposes, an interactive shell mode is available. 
 Example:
 
 ```bash
-python -m minisgl --model "Qwen/Qwen3-0.6B" --shell
+python -m sglang_interp --model "Qwen/Qwen3-0.6B" --shell
 ```
 
 ## Distributed Serving

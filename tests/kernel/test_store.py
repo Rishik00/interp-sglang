@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from minisgl.benchmark.perf import compare_memory_kernel_perf
 import torch
-from minisgl.kernel import store_cache
-from minisgl.utils import call_if_main
+from sglang_interp.benchmark.perf import compare_memory_kernel_perf
+from sglang_interp.kernel import store_cache
+from sglang_interp.utils import call_if_main
 
 
 @call_if_main(__name__)

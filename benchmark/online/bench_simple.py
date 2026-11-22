@@ -3,15 +3,15 @@ import random
 import sys
 from typing import List
 
-from minisgl.benchmark.client import (
+from openai import AsyncOpenAI as OpenAI
+from sglang_interp.benchmark.client import (
     benchmark_one,
     benchmark_one_batch,
     generate_prompt,
     get_model_name,
     process_benchmark_results,
 )
-from minisgl.utils import init_logger
-from openai import AsyncOpenAI as OpenAI
+from sglang_interp.utils import init_logger
 from transformers import AutoTokenizer
 
 logger = init_logger(__name__)

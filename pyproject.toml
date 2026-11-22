@@ -1,19 +1,19 @@
 [build-system]
-requires = ["setuptools>=61.0", "wheel"]
+requires = ["setuptools>=77.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "minisgl"
+name = "sglang-interp"
 version = "0.1.0"
-description = "What is this?"
+description = "Mini-SGLang fork that captures every layer's activations during generation, for interpretability work"
 readme = "README.md"
 requires-python = ">=3.10"
-license = {text = "MIT"}
+license = "MIT"
+authors = [{name = "Rishik00"}]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
@@ -37,6 +37,13 @@ dependencies = [
     "sgl_kernel>=0.3.17.post1",
     "quack-kernels",
 ]
+
+[project.urls]
+Repository = "https://github.com/Rishik00/interp-sglang"
+
+# `sglang-interp --model <id>` launches the server (same as `python -m sglang_interp`)
+[project.scripts]
+sglang-interp = "sglang_interp.server:launch_server"
 
 [project.optional-dependencies]
 dev = [
@@ -111,7 +118,7 @@ python_functions = ["test_*"]
 addopts = [
     "--strict-markers",
     "--strict-config",
-    "--cov=minisgl",
+    "--cov=sglang_interp",
     "--cov-report=term-missing",
     "--cov-report=html",
 ]

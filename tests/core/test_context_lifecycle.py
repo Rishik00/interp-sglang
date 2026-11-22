@@ -1,8 +1,8 @@
 import gc
 import weakref
 
-import minisgl.core as core
 import pytest
+import sglang_interp.core as core
 
 
 def test_context_release_allows_collection_and_next_engine(monkeypatch):

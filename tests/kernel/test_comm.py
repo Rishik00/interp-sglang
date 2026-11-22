@@ -1,12 +1,11 @@
 import os
 import time
+
+import sglang_interp.kernel as kernel
 import torch
-from minisgl.distributed import set_tp_info
-import minisgl.kernel as kernel
+from sglang_interp.distributed import set_tp_info
+from sglang_interp.utils import init_logger
 from tqdm import tqdm
-
-from minisgl.utils import init_logger
-
 
 logger = init_logger(__name__)
 
