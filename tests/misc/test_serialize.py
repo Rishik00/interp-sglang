@@ -4,10 +4,10 @@ from dataclasses import dataclass
 from typing import List
 
 import torch
-from sglang_interp.core import SamplingParams
-from sglang_interp.message import BatchBackendMsg, UserMsg
-from sglang_interp.message.utils import deserialize_type, serialize_type
-from sglang_interp.utils import call_if_main, init_logger
+from sgl_interp.core import SamplingParams
+from sgl_interp.message import BatchBackendMsg, UserMsg
+from sgl_interp.message.utils import deserialize_type, serialize_type
+from sgl_interp.utils import call_if_main, init_logger
 
 logger = init_logger(__name__)
 

@@ -28,22 +28,22 @@ The components communicate using **ZeroMQ (ZMQ)** for control messages and **NCC
 7. **Detokenizer** converts the token to text and sends it back to the **API Server**.
 8. **API Server** streams the result back to the **User**.
 
-## Code Organization (`sglang_interp` Package)
+## Code Organization (`sgl_interp` Package)
 
-The source code is located in `python/sglang_interp`. Here is a breakdown of the modules for developers:
+The source code is located in `python/sgl_interp`. Here is a breakdown of the modules for developers:
 
-- `sglang_interp.core`: Provides core dataclasses `Req` and `Batch` representing the state of requests, class `Context` which holds the global state of the inference context, and class `SamplingParams` holds the sampling parameters provided by users.
-- `sglang_interp.distributed`: Provides the interface to all-reduce and all-gather in tensor parallelism, and dataclass `DistributedInfo` which holds the TP information for a TP worker.
-- `sglang_interp.layers`: Implements basic building blocks for building LLMs with TP support, including linear, layernorm, embedding, RoPE, etc. They share common base classes defined in `sglang_interp.layers.base`.
-- `sglang_interp.models`: Implements LLM models, including Llama and Qwen3. Also defines utilities for loading weights from huggingface and sharding weights.
-- `sglang_interp.attention`: Provides interface of attention Backends and implements backends of `flashattention` and `flashinfer`. They are called by `AttentionLayer` and use metadata stored in `Context`.
-- `sglang_interp.kvcache`: Provides interface of KVCache pool and KVCache manager, and implements `MHAKVCache`, `NaiveCacheManager` and `RadixCacheManager`.
-- `sglang_interp.utils`: Provides a collection of utilities, including logger setup and wrappers around zmq.
-- `sglang_interp.engine`: Implements `Engine` class, which is a TP worker on a single process. It manages the model, context, KVCache, attention backend and cuda graph replaying.
-- `sglang_interp.message`: Defines messages exchanged (in zmq) between api_server, tokenizer, detokenizer and scheduler. All message types support automatic serialization and deserialization.
-- `sglang_interp.scheduler`: Implements `Scheduler` class, which runs on each TP worker process and manages the corresponding `Engine`. The rank 0 scheduler receives msgs from tokenizer, communicates with scheduler on other TP workers, and sends msgs to detokenizer.
-- `sglang_interp.server`: Defines cli arguments and `launch_server` which starts all the subprocesses of Mini-SGLang. Also implements a FastAPI server in `sglang_interp.server.api_server` acting as a frontend, providing endpoints such as `/v1/chat/completions`.
-- `sglang_interp.tokenizer`: Implements `tokenize_worker` function which handles tokenization and detokenization requests.
-- `sglang_interp.llm`: Provides class `LLM` as a python interface to interact with the Mini-SGLang system easily.
-- `sglang_interp.kernel`: Implements custom CUDA kernels, supported by `tvm-ffi` for python binding and jit interface.
-- `sglang_interp.benchmark`: Benchmark utilities.
+- `sgl_interp.core`: Provides core dataclasses `Req` and `Batch` representing the state of requests, class `Context` which holds the global state of the inference context, and class `SamplingParams` holds the sampling parameters provided by users.
+- `sgl_interp.distributed`: Provides the interface to all-reduce and all-gather in tensor parallelism, and dataclass `DistributedInfo` which holds the TP information for a TP worker.
+- `sgl_interp.layers`: Implements basic building blocks for building LLMs with TP support, including linear, layernorm, embedding, RoPE, etc. They share common base classes defined in `sgl_interp.layers.base`.
+- `sgl_interp.models`: Implements LLM models, including Llama and Qwen3. Also defines utilities for loading weights from huggingface and sharding weights.
+- `sgl_interp.attention`: Provides interface of attention Backends and implements backends of `flashattention` and `flashinfer`. They are called by `AttentionLayer` and use metadata stored in `Context`.
+- `sgl_interp.kvcache`: Provides interface of KVCache pool and KVCache manager, and implements `MHAKVCache`, `NaiveCacheManager` and `RadixCacheManager`.
+- `sgl_interp.utils`: Provides a collection of utilities, including logger setup and wrappers around zmq.
+- `sgl_interp.engine`: Implements `Engine` class, which is a TP worker on a single process. It manages the model, context, KVCache, attention backend and cuda graph replaying.
+- `sgl_interp.message`: Defines messages exchanged (in zmq) between api_server, tokenizer, detokenizer and scheduler. All message types support automatic serialization and deserialization.
+- `sgl_interp.scheduler`: Implements `Scheduler` class, which runs on each TP worker process and manages the corresponding `Engine`. The rank 0 scheduler receives msgs from tokenizer, communicates with scheduler on other TP workers, and sends msgs to detokenizer.
+- `sgl_interp.server`: Defines cli arguments and `launch_server` which starts all the subprocesses of Mini-SGLang. Also implements a FastAPI server in `sgl_interp.server.api_server` acting as a frontend, providing endpoints such as `/v1/chat/completions`.
+- `sgl_interp.tokenizer`: Implements `tokenize_worker` function which handles tokenization and detokenization requests.
+- `sgl_interp.llm`: Provides class `LLM` as a python interface to interact with the Mini-SGLang system easily.
+- `sgl_interp.kernel`: Implements custom CUDA kernels, supported by `tvm-ffi` for python binding and jit interface.
+- `sgl_interp.benchmark`: Benchmark utilities.

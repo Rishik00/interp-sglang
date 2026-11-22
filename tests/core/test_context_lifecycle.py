@@ -2,7 +2,7 @@ import gc
 import weakref
 
 import pytest
-import sglang_interp.core as core
+import sgl_interp.core as core
 
 
 def test_context_release_allows_collection_and_next_engine(monkeypatch):

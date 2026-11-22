@@ -3,11 +3,11 @@ from __future__ import annotations
 import multiprocessing as mp
 
 import torch
-from sglang_interp.core import SamplingParams
-from sglang_interp.distributed import DistributedInfo
-from sglang_interp.message import BaseBackendMsg, BaseTokenizerMsg, DetokenizeMsg, ExitMsg, UserMsg
-from sglang_interp.scheduler import Scheduler, SchedulerConfig
-from sglang_interp.utils import ZmqPullQueue, ZmqPushQueue, call_if_main, init_logger
+from sgl_interp.core import SamplingParams
+from sgl_interp.distributed import DistributedInfo
+from sgl_interp.message import BaseBackendMsg, BaseTokenizerMsg, DetokenizeMsg, ExitMsg, UserMsg
+from sgl_interp.scheduler import Scheduler, SchedulerConfig
+from sgl_interp.utils import ZmqPullQueue, ZmqPushQueue, call_if_main, init_logger
 from transformers import AutoTokenizer
 
 logger = init_logger(__name__)

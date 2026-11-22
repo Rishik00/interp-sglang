@@ -3,7 +3,7 @@ requires = ["setuptools>=77.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "sglang-interp"
+name = "sgl_interp"
 version = "0.1.0"
 description = "Mini-SGLang fork that captures every layer's activations during generation, for interpretability work"
 readme = "README.md"
@@ -41,9 +41,9 @@ dependencies = [
 [project.urls]
 Repository = "https://github.com/Rishik00/interp-sglang"
 
-# `sglang-interp --model <id>` launches the server (same as `python -m sglang_interp`)
+# `sgl_interp --model <id>` launches the server (same as `python -m sgl_interp`)
 [project.scripts]
-sglang-interp = "sglang_interp.server:launch_server"
+sgl_interp = "sgl_interp.server:launch_server"
 
 [project.optional-dependencies]
 dev = [
@@ -118,7 +118,7 @@ python_functions = ["test_*"]
 addopts = [
     "--strict-markers",
     "--strict-config",
-    "--cov=sglang_interp",
+    "--cov=sgl_interp",
     "--cov-report=term-missing",
     "--cov-report=html",
 ]

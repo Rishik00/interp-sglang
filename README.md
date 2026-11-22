@@ -1,4 +1,4 @@
-# SGLang Interp
+# sgl_interp
 
 Mini-SGLang fork with activation capture for interpretability work.
 
@@ -17,17 +17,17 @@ pip install git+https://github.com/Rishik00/interp-sglang.git
 pip install -e .
 ```
 
-The import name is `sglang_interp`. Launch the server with:
+The import name is `sgl_interp`. Launch the server with:
 
 ```bash
-sglang-interp --model Qwen/Qwen3-1.7B
+sgl_interp --model Qwen/Qwen3-1.7B
 ```
 
-The module entry point is `python -m sglang_interp`. Python imports use:
+The module entry point is `python -m sgl_interp`. Python imports use:
 
 ```python
-from sglang_interp.capture import ActivationCaptureConfig
-from sglang_interp.llm import LLM
+from sgl_interp.capture import ActivationCaptureConfig
+from sgl_interp.llm import LLM
 ```
 
 The package was renamed from `minisgl`; update existing imports and launch commands.

@@ -4,9 +4,9 @@ from typing import Tuple
 
 import torch
 import torch.nn.functional as F
-from sglang_interp.benchmark.perf import compare_memory_kernel_perf
-from sglang_interp.kernel import indexing
-from sglang_interp.utils import call_if_main, init_logger
+from sgl_interp.benchmark.perf import compare_memory_kernel_perf
+from sgl_interp.kernel import indexing
+from sgl_interp.utils import call_if_main, init_logger
 
 logger = init_logger(__name__)
 

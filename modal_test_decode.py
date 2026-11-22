@@ -148,9 +148,9 @@ def run_decode(
 ):
     import torch
     import transformers
-    from sglang_interp.capture import ActivationCaptureConfig
-    from sglang_interp.core import SamplingParams
-    from sglang_interp.llm import LLM
+    from sgl_interp.capture import ActivationCaptureConfig
+    from sgl_interp.core import SamplingParams
+    from sgl_interp.llm import LLM
     from transformers import AutoConfig
 
     model_config = AutoConfig.from_pretrained(model_id)
@@ -257,7 +257,7 @@ def run_decode(
             llm.shutdown()
             llm = None
             manager = None
-            from sglang_interp.layers.rotary import get_rope
+            from sgl_interp.layers.rotary import get_rope
 
             get_rope.cache_clear()
             mem_cleanup()

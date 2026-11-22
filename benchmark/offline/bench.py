@@ -3,8 +3,8 @@
 import time
 from random import randint, seed
 
-from sglang_interp.core import SamplingParams
-from sglang_interp.llm import LLM
+from sgl_interp.core import SamplingParams
+from sgl_interp.llm import LLM
 
 
 def main():

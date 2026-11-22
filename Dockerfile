@@ -42,14 +42,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user
-RUN useradd --create-home --shell /bin/bash --uid 1001 sglang_interp
+RUN useradd --create-home --shell /bin/bash --uid 1001 sgl_interp
 
 # Copy application from builder
-COPY --from=builder --chown=sglang_interp:sglang_interp /app /app
+COPY --from=builder --chown=sgl_interp:sgl_interp /app /app
 
 # Create cache directories
 RUN mkdir -p /app/.cache/huggingface /app/.cache/tvm-ffi /app/.cache/flashinfer \
-    && chown -R sglang_interp:sglang_interp /app/.cache
+    && chown -R sgl_interp:sgl_interp /app/.cache
 
 WORKDIR /app
 
@@ -64,9 +64,9 @@ ENV HF_HOME=/app/.cache/huggingface
 ENV TVM_FFI_CACHE_DIR=/app/.cache/tvm-ffi
 ENV FLASHINFER_WORKSPACE_BASE=/app/.cache/flashinfer
 
-USER sglang_interp
+USER sgl_interp
 
 EXPOSE 1919
 
-ENTRYPOINT ["python", "-m", "sglang_interp"]
+ENTRYPOINT ["python", "-m", "sgl_interp"]
 CMD ["--help"]

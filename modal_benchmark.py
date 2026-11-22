@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING, Any
 import modal
 
 if TYPE_CHECKING:
-    from sglang_interp.llm import LLM  # type: ignore
+    from sgl_interp.llm import LLM  # type: ignore
 
 from config import (
     LOCAL_REPO,
@@ -62,7 +62,7 @@ def run_once(
     warmup: bool = False,
 ) -> dict[str, Any]:
     import torch
-    from sglang_interp.core import SamplingParams  # type:ignore
+    from sgl_interp.core import SamplingParams  # type:ignore
 
     manager.enabled = capture
     if manager.drain():
@@ -212,8 +212,8 @@ def benchmark_model(
         raise ValueError("Activation benchmarking currently supports only the naive cache")
 
     import torch
-    from sglang_interp.capture import ActivationCaptureConfig
-    from sglang_interp.llm import LLM
+    from sgl_interp.capture import ActivationCaptureConfig
+    from sgl_interp.llm import LLM
 
     os.chdir(REMOTE_REPO)
 
@@ -339,9 +339,9 @@ def validate_model(
 ) -> dict:
     import torch
     import transformers
-    from sglang_interp.capture import ActivationCaptureConfig
-    from sglang_interp.core import SamplingParams
-    from sglang_interp.llm import LLM
+    from sgl_interp.capture import ActivationCaptureConfig
+    from sgl_interp.core import SamplingParams
+    from sgl_interp.llm import LLM
     from transformers import AutoModelForCausalLM
 
     # Aggregate and per-token checks tolerate FP16 kernel/reduction differences.
@@ -387,7 +387,7 @@ def validate_model(
         llm.shutdown()
         llm = None
         manager = None
-        from sglang_interp.layers.rotary import get_rope
+        from sgl_interp.layers.rotary import get_rope
 
         get_rope.cache_clear()
         mem_cleanup()

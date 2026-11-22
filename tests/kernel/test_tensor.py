@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import torch
-from sglang_interp.kernel import test_tensor
-from sglang_interp.utils import call_if_main
+from sgl_interp.kernel import test_tensor
+from sgl_interp.utils import call_if_main
 
 
 @call_if_main()

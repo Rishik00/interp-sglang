@@ -5,8 +5,8 @@ from pathlib import Path
 from random import seed
 
 import pyarrow.parquet as pq
-from sglang_interp.core import SamplingParams
-from sglang_interp.llm import LLM
+from sgl_interp.core import SamplingParams
+from sgl_interp.llm import LLM
 from transformers import AutoTokenizer
 
 LANGS = {"English", "Chinese"}

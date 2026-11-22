@@ -6,14 +6,14 @@ import random
 from pathlib import Path
 
 from openai import AsyncOpenAI as OpenAI
-from sglang_interp.benchmark.client import (
+from sgl_interp.benchmark.client import (
     benchmark_trace,
     get_model_name,
     process_benchmark_results,
     read_qwen_trace,
     scale_traces,
 )
-from sglang_interp.utils import init_logger
+from sgl_interp.utils import init_logger
 from transformers import AutoTokenizer
 
 logger = init_logger(__name__)
