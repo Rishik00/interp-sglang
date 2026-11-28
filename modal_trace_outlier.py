@@ -51,6 +51,9 @@ from utils import hugging_face_modal_secrets, mem_cleanup, reconstruct_capture
 
 OUTPUT_DIR = LOCAL_REPO / "artifacts/matched-prefill"
 TARGET_PATH = OUTPUT_DIR / "outlier-target.json"
+# The stages build the engine with max_seq_len_override=4096; the scheduler drops any
+# prompt that is not strictly shorter, which would leave the trace with no captures.
+MAX_ENGINE_TOKENS = 4096
 # Stage name -> artifact prefix. The prefixes match the 2026-11-28 artifacts.
 STAGE_PREFIX = {
     "trace": "outlier",
@@ -766,6 +769,9 @@ def pick_target(run_path, workload_path, dataset_row=None, token_position=None):
     best = None
     with Path(run_path).open(encoding="utf-8") as handle:
         setup = json.loads(next(handle))
+        # Every stage replays the prompt as one whole-prompt prefill, so the run must match.
+        if setup.get("mode") != "whole":
+            raise ValueError("Outlier tracing requires a whole-prompt run, not a chunked one")
         for line in handle:
             record = json.loads(line)
             if dataset_row is not None and record["dataset_row"] != dataset_row:
@@ -782,6 +788,10 @@ def pick_target(run_path, workload_path, dataset_row=None, token_position=None):
         raise ValueError("No matching prompt in the saved run")
     value, record, position = best
     prompt = prompts[record["dataset_row"]]
+    if len(prompt["token_ids"]) >= MAX_ENGINE_TOKENS:
+        raise ValueError(
+            f"Prompt has {len(prompt['token_ids'])} tokens; limit {MAX_ENGINE_TOKENS - 1}"
+        )
     if prompt["token_ids"] != record["token_ids"]:
         raise ValueError("Saved run and workload disagree on the prompt's token IDs")
     target = {

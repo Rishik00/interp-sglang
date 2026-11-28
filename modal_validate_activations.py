@@ -367,8 +367,9 @@ def audit_model(model_id, source):
             {
                 "input_eps": layer.input_layernorm.eps,
                 "post_attention_eps": layer.post_attention_layernorm.eps,
-                "q_eps": layer.self_attn.q_norm.eps,
-                "k_eps": layer.self_attn.k_norm.eps,
+                # Llama has no Q/K norm; record None so both sides still compare equal.
+                "q_eps": layer.self_attn.q_norm.eps if layer.self_attn.q_norm else None,
+                "k_eps": layer.self_attn.k_norm.eps if layer.self_attn.k_norm else None,
                 "head_dim": layer.self_attn.attn.head_dim,
                 "q_heads": layer.self_attn.attn.num_qo_heads,
                 "kv_heads": layer.self_attn.attn.num_kv_heads,
@@ -428,8 +429,8 @@ def audit_model(model_id, source):
         expected = {
             "input_eps": block.input_layernorm.variance_epsilon,
             "post_attention_eps": block.post_attention_layernorm.variance_epsilon,
-            "q_eps": block.self_attn.q_norm.variance_epsilon,
-            "k_eps": block.self_attn.k_norm.variance_epsilon,
+            "q_eps": getattr(getattr(block.self_attn, "q_norm", None), "variance_epsilon", None),
+            "k_eps": getattr(getattr(block.self_attn, "k_norm", None), "variance_epsilon", None),
             "head_dim": block.self_attn.head_dim,
             "q_heads": reference.config.num_attention_heads,
             "kv_heads": reference.config.num_key_value_heads,

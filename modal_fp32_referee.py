@@ -40,6 +40,9 @@ from config import LOCAL_REPO, REMOTE_CACHE, app, cache_volume, dependency_image
 from utils import hugging_face_modal_secrets, mem_cleanup, reconstruct_capture
 
 OUTPUT_DIR = LOCAL_REPO / "artifacts/matched-prefill"
+# run_prompt_referee builds the engine with max_seq_len_override=4096; the scheduler drops
+# any prompt that is not strictly shorter, so such prompts are rejected before launch.
+MAX_ENGINE_TOKENS = 4096
 
 
 # Per-token metrics for one prompt. Inputs: three traces keyed by (layer, signal), each
@@ -291,6 +294,13 @@ def run_referee(workload_path, model_id, dataset_rows):
     missing = set(dataset_rows) - set(selected)
     if missing:
         raise ValueError(f"Rows not in the saved workload: {sorted(missing)}")
+    too_long = {
+        row: len(p["token_ids"])
+        for row, p in selected.items()
+        if len(p["token_ids"]) >= MAX_ENGINE_TOKENS
+    }
+    if too_long:
+        raise ValueError(f"Prompts must be under {MAX_ENGINE_TOKENS} tokens; too long: {too_long}")
     timestamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
     batch_directory = OUTPUT_DIR / f"fp32-referee-prompts-{timestamp}"
     batch_directory.mkdir(parents=True)
