@@ -58,7 +58,27 @@ SAVED_WORKLOADS = {
     "meta-llama/Llama-3.2-1B": "validate-meta-llama--Llama-3.2-1B-20261101T225510Z.json",
     "meta-llama/Llama-3.2-3B": "validate-meta-llama--Llama-3.2-3B-20261101T230227Z.json",
 }
+# Without those files (e.g. a fresh clone), sample with the same settings they used.
+DEFAULT_SAMPLING = {
+    "prompts": [],
+    "seed": 42,
+    "revision": "c827c6df8fcf008219ffaffa4d1dd77491099367",
+    "max_input_tokens": 3072,
+}
+DEFAULT_MEMORY_RATIO = {"Qwen/Qwen3-4B": 0.75, "meta-llama/Llama-3.2-3B": 0.75}
 OUTPUT_DIR = LOCAL_REPO / "artifacts/matched-prefill"
+
+
+def load_saved_workload(model_id):
+    """Return (earlier workload or default sampling settings, engine memory ratio)."""
+    path = LOCAL_REPO / "artifacts/modal-traces" / SAVED_WORKLOADS[model_id]
+    if not path.exists():
+        print(f"No saved workload for {model_id}; sampling with the default settings.")
+        return dict(DEFAULT_SAMPLING), DEFAULT_MEMORY_RATIO.get(model_id, 0.45)
+    previous = json.loads(path.read_text())
+    if previous["model"] != model_id:
+        raise ValueError("Saved workload belongs to another model")
+    return previous["workload"], previous["memory_ratio"]
 
 
 # Workload preparation (Modal CPU). Pins the checkpoint revision and, when a larger
@@ -603,14 +623,12 @@ def main():
     (OUTPUT_DIR / "completion.json").write_text(json.dumps({"status": "running"}))
     with modal.enable_output(), app.run(detach=True):
         for model_id in args.model_id:
-            previous = json.loads(
-                (LOCAL_REPO / "artifacts/modal-traces" / SAVED_WORKLOADS[model_id]).read_text()
-            )
-            if previous["model"] != model_id:
-                raise ValueError("Saved workload belongs to another model")
+            saved_workload, memory_ratio = load_saved_workload(model_id)
+            # With no saved prompts to reuse, draw 100 unless --num-prompts says otherwise.
+            num_prompts = args.num_prompts or (None if saved_workload["prompts"] else 100)
             # Prepare once per model so all modes share checkpoint and input IDs.
             revision, workload = prepare_model_workload.with_options(**options).remote(
-                model_id, previous["workload"], args.num_prompts, args.dataset_scan_rows
+                model_id, saved_workload, num_prompts, args.dataset_scan_rows
             )
             workload_path = OUTPUT_DIR / f"{model_id.replace('/', '--')}-workload-{timestamp}.json"
             workload_path.write_text(json.dumps(workload, indent=2), encoding="utf-8")
@@ -622,7 +640,7 @@ def main():
                     workload,
                     mode,
                     args.chunk_size,
-                    previous["memory_ratio"],
+                    memory_ratio,
                     source,
                     path.name,
                 )
